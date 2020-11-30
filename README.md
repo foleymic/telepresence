@@ -307,4 +307,49 @@ Telepresence installs the Traffic Manager in your cluster if it is not already p
 
 Telepresence installs the Traffic Agent as an additional container in any deployment you intercept, and modifies any associated services it finds to route traffic through the agent. This modification persists unless you uninstall it.
 
-You can launch other Telepresence sessions to the same cluster while an existing session is running, letting you intercept other deployments.
+You can launch other Telepresence sessions to the same cluster while an existing session is running, letting you intercept other deployments. When doing so, it is important to end the first session last because it established the traffic-manager connection and will close it when it ends, rendering the other services disconnected.
+
+## Architecture
+
+There are 2 binaries, but via sub-commands we really have 5 "programs":
+
+Laptop-side:
+ 1. `telepresence`: The user-facing CLI
+ 2. `telepresence connector`: The normal-user daemon
+ 3. `telepresence daemon`: The super-user daemon
+
+Cluster-side:
+ 4. `traffic manager`: The thing in-cluster that coordinates everything
+ 5. `traffic agent`: The application sidecar
+
+https://github.com/datawire/apro/pull/1015
+https://github.com/datawire/ambassador/pull/2336
+
+The manager selects an unused port (using internal bookkeeping,
+heavens forbid we actually leverage the kernel), and communicates that
+as the 'manager_port' field in the InterceptInfo.  The communicator
+ssh's to the manager with `-R ${managerPort}:${localThingToForwardItTo}`.
+
+rootd:
+ 1. listens for gRPC on /var/run/telepresence-daemon.socket
+ 2. talks SOCKS to userd on localhost:1080
+ 3. does OS-specific things to forward the appropriate traffic
+    (configured by #1) to userd (via #2).
+
+userd:
+ - talks gRPC to rootd on /var/run/telepresence-daemon.socket
+ - listens for...
+   1. SOCKS on TCP localhost:1080
+   2. gRPC on /tmp/telepresence-connector.socket
+ - runs background processes to...
+   1. Keep the rootd in sync with the cluster (via telepresence-daemon.socket)
+   2. Keep the SystemA auth token refreshed
+   3. Keep the manager session alive
+
+cli:
+ - talks gRPC to userd on /tmp/telepresence-connector.socket
+
+- What's with ReviewInterceptRequest?
+- What to do about full-blown-Ambassador?
+- mech-tcp
+- what's with all the '2' proto messages?
