@@ -82,7 +82,7 @@ promote-to-stable:
 	echo $(patsubst v%,%,$(TELEPRESENCE_VERSION)) > $(BUILDDIR)/stable.txt
 	AWS_PAGER="" aws s3api put-object \
 		--bucket datawire-static-files \
-		--key tel2/$(GOHOSTOS)/$(GOHOSTARCH)/stable.txt \
+		--key tel2/stable.txt \
 		--body $(BUILDDIR)/stable.txt
 
 .PHONY: install
