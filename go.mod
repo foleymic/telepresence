@@ -1,6 +1,6 @@
 module github.com/telepresenceio/telepresence/v2
 
-go 1.15
+go 1.16
 
 require (
 	github.com/blang/semver v3.5.0+incompatible
