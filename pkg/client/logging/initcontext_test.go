@@ -3,7 +3,6 @@ package logging
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,7 +98,7 @@ func TestInitContext(t *testing.T) {
 		errMsg := "error"
 		fmt.Fprintln(os.Stderr, errMsg)
 
-		bs, err := ioutil.ReadFile(logFile)
+		bs, err := os.ReadFile(logFile)
 		check.NoError(err)
 		check.Equal(fmt.Sprintf("%s\n%s\n", infoMsg, errMsg), string(bs))
 	})
@@ -117,7 +116,7 @@ func TestInitContext(t *testing.T) {
 		println(msg)
 		check.FileExists(logFile)
 
-		bs, err := ioutil.ReadFile(logFile)
+		bs, err := os.ReadFile(logFile)
 		check.NoError(err)
 		check.Equal(fmt.Sprintln(msg), string(bs))
 	})
@@ -150,7 +149,7 @@ func TestInitContext(t *testing.T) {
 		backupFile = filepath.Join(logDir, fmt.Sprintf("%s-%s.log", logName, dtime.Now().Format("20060102T150405")))
 		check.FileExists(backupFile)
 
-		bs, err := ioutil.ReadFile(logFile)
+		bs, err := os.ReadFile(logFile)
 		check.NoError(err)
 		check.Equal(fmt.Sprintf("%s %s\n", infoTs, infoMsg), string(bs))
 	})
@@ -171,7 +170,7 @@ func TestInitContext(t *testing.T) {
 		// Give file remover some time to finish
 		time.Sleep(100 * time.Millisecond)
 
-		files, err := ioutil.ReadDir(logDir)
+		files, err := os.ReadDir(logDir)
 		check.NoError(err)
 		check.Equal(5, len(files))
 	})

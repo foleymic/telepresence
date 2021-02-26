@@ -3,7 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -139,7 +139,7 @@ func (s *outboundSuite) TestMassiveUpdate() {
 				r, err := client.Get("http://" + host)
 				require.NoError(err)
 				b := r.Body
-				txt, err := ioutil.ReadAll(b)
+				txt, err := io.ReadAll(b)
 				b.Close()
 				require.NoError(err)
 				require.Equal(host, strings.TrimSpace(string(txt)))

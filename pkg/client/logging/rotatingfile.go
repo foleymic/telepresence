@@ -2,7 +2,6 @@ package logging
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -298,7 +297,7 @@ func (rf *RotatingFile) removeOldFiles() {
 	rf.removeMutex.Lock()
 	defer rf.removeMutex.Unlock()
 
-	files, err := ioutil.ReadDir(rf.dirName)
+	files, err := os.ReadDir(rf.dirName)
 	if err != nil {
 		return
 	}

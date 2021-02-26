@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"net"
 	"os"
@@ -30,7 +29,7 @@ func (o *outbound) dnsServerWorker(c context.Context, onReady func()) error {
 
 func (o *outbound) runOverridingServer(c context.Context, onReady func()) error {
 	if o.dnsIP == "" {
-		dat, err := ioutil.ReadFile("/etc/resolv.conf")
+		dat, err := os.ReadFile("/etc/resolv.conf")
 		if err != nil {
 			return err
 		}

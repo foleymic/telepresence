@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -204,7 +203,7 @@ func (l *loginExecutor) retrieveUserInfo(ctx context.Context, token *oauth2.Toke
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status %v from user info endpoint", resp.StatusCode)
 	}
-	content, err := ioutil.ReadAll(resp.Body)
+	content, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}

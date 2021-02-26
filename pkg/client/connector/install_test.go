@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -33,7 +33,7 @@ var testVersion string
 var managerTestNamespace string
 
 func TestMain(m *testing.M) {
-	log.SetOutput(ioutil.Discard) // We want success or failure, not an abundance of output
+	log.SetOutput(io.Discard) // We want success or failure, not an abundance of output
 	kubeconfig = dtest.Kubeconfig()
 	testVersion = fmt.Sprintf("v2.0.0-gotest.%d", os.Getpid())
 	namespace = fmt.Sprintf("telepresence-%d", os.Getpid())
@@ -260,7 +260,7 @@ func TestAddAgentToDeployment(t *testing.T) {
 	}
 	testcases := map[string]testcase{}
 
-	fileinfos, err := ioutil.ReadDir("testdata/addAgentToDeployment")
+	fileinfos, err := os.ReadDir("testdata/addAgentToDeployment")
 	if err != nil {
 		t.Fatal(err)
 	}
