@@ -2,10 +2,13 @@ package tun
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -18,18 +21,105 @@ const sysProtoControl = 2
 const uTunOptIfName = 2
 const uTunControlName = "com.apple.net.utun_control"
 
-type tunDevice struct {
-	*os.File
-	name string
+func OpenTun() (*Device, error) {
+	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysProtoControl)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = unix.Close(fd)
+		}
+	}()
+
+	info := &unix.CtlInfo{}
+	copy(info.Name[:], uTunControlName)
+	if err = unix.IoctlCtlInfo(fd, info); err != nil {
+		return nil, fmt.Errorf("failed to get IOCTL info: %w", err)
+	}
+
+	if err = unix.Connect(fd, &unix.SockaddrCtl{ID: info.Id, Unit: 0}); err != nil {
+		return nil, err
+	}
+
+	if err = syscall.SetNonblock(fd, true); err != nil {
+		return nil, err
+	}
+
+	name, err := unix.GetsockoptString(fd, sysProtoControl, uTunOptIfName)
+	if err != nil {
+		return nil, err
+	}
+	return &Device{os.NewFile(uintptr(fd), ""), name}, nil
 }
 
-func (t *tunDevice) AddSubnet(_ context.Context, subnet *net.IPNet, to net.IP) error {
+func (t *Device) AddSubnet(_ context.Context, subnet *net.IPNet, to net.IP) error {
 	if err := t.setAddr(subnet, to); err != nil {
 		return err
 	}
 	return withRouteSocket(func(s int) error {
 		return t.routeAdd(s, 1, subnet, to)
 	})
+}
+
+func (t *Device) SetMTU(mtu int) error {
+	return withSocket(unix.AF_INET, func(fd int) error {
+		var ifr unix.IfreqMTU
+		copy(ifr.Name[:], t.name)
+		ifr.MTU = int32(mtu)
+		err := unix.IoctlSetIfreqMTU(fd, &ifr)
+		if err != nil {
+			err = fmt.Errorf("set MTU on %s failed: %w", t.name, err)
+		}
+		return err
+	})
+}
+
+var bufPool = sync.Pool{New: func() interface{} {
+	return make([]byte, 0x1000)
+}}
+
+func (t *Device) Read(into []byte) (int, error) {
+	buf := bufPool.Get().([]byte)
+	if cap(buf) < len(into)+4 {
+		buf = make([]byte, len(into)+4)
+	}
+	defer bufPool.Put(buf)
+	rBuf := buf[:len(into)+4]
+	n, err := t.File.Read(rBuf)
+	if n < 4 {
+		if err == nil {
+			err = io.ErrUnexpectedEOF
+		}
+		return 0, err
+	}
+	copy(into, rBuf[4:])
+	return n - 4, err
+}
+
+func (t *Device) Write(from []byte) (int, error) {
+	if len(from) == 0 {
+		return 0, syscall.EIO
+	}
+
+	buf := bufPool.Get().([]byte)
+	if cap(buf) < len(from)+4 {
+		buf = make([]byte, len(from)+4)
+	}
+	defer bufPool.Put(buf)
+
+	wBuf := buf[:len(from)+4]
+	ipVer := from[0] >> 4
+	if ipVer == 4 {
+		wBuf[3] = syscall.AF_INET
+	} else if ipVer == 6 {
+		wBuf[3] = syscall.AF_INET6
+	} else {
+		return 0, errors.New("unable to determine IP version from packet")
+	}
+	copy(wBuf[4:], from)
+	n, err := t.File.Write(wBuf)
+	return n - 4, err
 }
 
 // withRouteSocket will open the socket to where RouteMessages should be sent
@@ -76,7 +166,7 @@ func toRouteMask(mask net.IPMask) (addr route.Addr) {
 	return addr
 }
 
-func (t *tunDevice) newRouteMessage(rtm, seq int, subnet *net.IPNet, gw net.IP) *route.RouteMessage {
+func (t *Device) newRouteMessage(rtm, seq int, subnet *net.IPNet, gw net.IP) *route.RouteMessage {
 	return &route.RouteMessage{
 		Version: syscall.RTM_VERSION,
 		ID:      uintptr(os.Getpid()),
@@ -91,7 +181,7 @@ func (t *tunDevice) newRouteMessage(rtm, seq int, subnet *net.IPNet, gw net.IP) 
 	}
 }
 
-func (t *tunDevice) routeAdd(routeSocket, seq int, r *net.IPNet, gw net.IP) error {
+func (t *Device) routeAdd(routeSocket, seq int, r *net.IPNet, gw net.IP) error {
 	m := t.newRouteMessage(syscall.RTM_ADD, seq, r, gw)
 	wb, err := m.Marshal()
 	if err != nil {
@@ -105,7 +195,7 @@ func (t *tunDevice) routeAdd(routeSocket, seq int, r *net.IPNet, gw net.IP) erro
 	return err
 }
 
-func (t *tunDevice) routeClear(routeSocket, seq int, r *net.IPNet, gw net.IP) error {
+func (t *Device) routeClear(routeSocket, seq int, r *net.IPNet, gw net.IP) error {
 	m := t.newRouteMessage(syscall.RTM_DELETE, seq, r, gw)
 	wb, err := m.Marshal()
 	if err != nil {
@@ -117,42 +207,6 @@ func (t *tunDevice) routeClear(routeSocket, seq int, r *net.IPNet, gw net.IP) er
 		err = nil
 	}
 	return err
-}
-
-func OpenTun() (*tunDevice, error) {
-	fd, err := unix.Socket(unix.AF_SYSTEM, unix.SOCK_DGRAM, sysProtoControl)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err != nil {
-			_ = unix.Close(fd)
-		}
-	}()
-
-	info := &unix.CtlInfo{}
-	copy(info.Name[:], uTunControlName)
-	if err = unix.IoctlCtlInfo(fd, info); err != nil {
-		return nil, fmt.Errorf("failed to get IOCTL info: %w", err)
-	}
-
-	if err = unix.Connect(fd, &unix.SockaddrCtl{ID: info.Id, Unit: 0}); err != nil {
-		return nil, err
-	}
-
-	if err = syscall.SetNonblock(fd, true); err != nil {
-		return nil, err
-	}
-
-	name, err := unix.GetsockoptString(fd, sysProtoControl, uTunOptIfName)
-	if err != nil {
-		return nil, err
-	}
-	return &tunDevice{os.NewFile(uintptr(fd), ""), name}, nil
-}
-
-func (t *tunDevice) Name() string {
-	return t.name
 }
 
 func withSocket(domain int, f func(fd int) error) error {
@@ -204,7 +258,7 @@ type addrIfReq6 struct {
 const SIOCAIFADDR_IN6 = (unix.SIOCAIFADDR & 0xe000ffff) | (uint(unsafe.Sizeof(addrIfReq6{})) << 16)
 const ND6_INFINITE_LIFETIME = 0xffffffff
 
-func (t *tunDevice) setAddr(subnet *net.IPNet, to net.IP) error {
+func (t *Device) setAddr(subnet *net.IPNet, to net.IP) error {
 	if sub4, to4, ok := addrToIp4(subnet, to); ok {
 		return withSocket(unix.AF_INET, func(fd int) error {
 			ifreq := &addrIfReq{
@@ -238,17 +292,4 @@ func (t *tunDevice) setAddr(subnet *net.IPNet, to net.IP) error {
 			return err
 		})
 	}
-}
-
-func (t *tunDevice) SetMTU(mtu int) error {
-	return withSocket(unix.AF_INET, func(fd int) error {
-		var ifr unix.IfreqMTU
-		copy(ifr.Name[:], t.name)
-		ifr.MTU = int32(mtu)
-		err := unix.IoctlSetIfreqMTU(fd, &ifr)
-		if err != nil {
-			err = fmt.Errorf("set MTU on %s failed: %w", t.name, err)
-		}
-		return err
-	})
 }
