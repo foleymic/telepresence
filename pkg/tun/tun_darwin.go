@@ -12,8 +12,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	"golang.org/x/net/route"
-
 	"golang.org/x/sys/unix"
 )
 
@@ -122,114 +120,7 @@ func (t *Device) Write(from []byte) (int, error) {
 	return n - 4, err
 }
 
-// withRouteSocket will open the socket to where RouteMessages should be sent
-// and call the given function with that socket. The socket is closed when the
-// function returns
-func withRouteSocket(f func(routeSocket int) error) error {
-	routeSocket, err := syscall.Socket(syscall.AF_ROUTE, syscall.SOCK_RAW, syscall.AF_UNSPEC)
-	if err != nil {
-		return err
-	}
-
-	// Avoid the overhead of echoing messages back to sender
-	if err = syscall.SetsockoptInt(routeSocket, syscall.SOL_SOCKET, syscall.SO_USELOOPBACK, 0); err != nil {
-		return err
-	}
-	defer syscall.Close(routeSocket)
-	return f(routeSocket)
-}
-
-// toRouteAddr converts an net.IP to its corresponding route.Addr
-func toRouteAddr(ip net.IP) (addr route.Addr) {
-	if ip4 := ip.To4(); ip4 != nil {
-		dst := route.Inet4Addr{}
-		copy(dst.IP[:], ip4)
-		addr = &dst
-	} else {
-		dst := route.Inet6Addr{}
-		copy(dst.IP[:], ip)
-		addr = &dst
-	}
-	return addr
-}
-
-func toRouteMask(mask net.IPMask) (addr route.Addr) {
-	if _, bits := mask.Size(); bits == 32 {
-		dst := route.Inet4Addr{}
-		copy(dst.IP[:], mask)
-		addr = &dst
-	} else {
-		dst := route.Inet6Addr{}
-		copy(dst.IP[:], mask)
-		addr = &dst
-	}
-	return addr
-}
-
-func (t *Device) newRouteMessage(rtm, seq int, subnet *net.IPNet, gw net.IP) *route.RouteMessage {
-	return &route.RouteMessage{
-		Version: syscall.RTM_VERSION,
-		ID:      uintptr(os.Getpid()),
-		Seq:     seq,
-		Type:    rtm,
-		Flags:   syscall.RTF_UP | syscall.RTF_STATIC | syscall.RTF_CLONING,
-		Addrs: []route.Addr{
-			syscall.RTAX_DST:     toRouteAddr(subnet.IP),
-			syscall.RTAX_GATEWAY: toRouteAddr(gw),
-			syscall.RTAX_NETMASK: toRouteMask(subnet.Mask),
-		},
-	}
-}
-
-func (t *Device) routeAdd(routeSocket, seq int, r *net.IPNet, gw net.IP) error {
-	m := t.newRouteMessage(syscall.RTM_ADD, seq, r, gw)
-	wb, err := m.Marshal()
-	if err != nil {
-		return err
-	}
-	_, err = syscall.Write(routeSocket, wb)
-	if err == unix.EEXIST {
-		// route exists, that's OK
-		err = nil
-	}
-	return err
-}
-
-func (t *Device) routeClear(routeSocket, seq int, r *net.IPNet, gw net.IP) error {
-	m := t.newRouteMessage(syscall.RTM_DELETE, seq, r, gw)
-	wb, err := m.Marshal()
-	if err != nil {
-		return err
-	}
-	_, err = syscall.Write(routeSocket, wb)
-	if err == unix.ESRCH {
-		// route doesn't exist, that's OK
-		err = nil
-	}
-	return err
-}
-
-func withSocket(domain int, f func(fd int) error) error {
-	fd, err := unix.Socket(domain, unix.SOCK_DGRAM, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(fd)
-	return f(fd)
-}
-
-func addrToIp4(subnet *net.IPNet, to net.IP) (*net.IPNet, net.IP, bool) {
-	if to4 := to.To4(); to4 != nil {
-		if dest4 := subnet.IP.To4(); dest4 != nil {
-			if _, bits := subnet.Mask.Size(); bits == 32 {
-				return &net.IPNet{IP: dest4, Mask: subnet.Mask}, to4, true
-			}
-		}
-	}
-	return nil, nil, false
-}
-
-// Address structure for the SIOCAIFADDR ioctl request
+// Address structure for the SIOCAIFADDR ioctlHandle request
 //
 // See https://www.unix.com/man-page/osx/4/netintro/
 type addrIfReq struct {
@@ -239,7 +130,7 @@ type addrIfReq struct {
 	mask unix.RawSockaddrInet4
 }
 
-// Address structure for the SIOCAIFADDR_IN6 ioctl request
+// Address structure for the SIOCAIFADDR_IN6 ioctlHandle request
 //
 // See https://www.unix.com/man-page/osx/4/netintro/
 type addrIfReq6 struct {
@@ -254,7 +145,7 @@ type addrIfReq6 struct {
 	prefixLifeTime uint32
 }
 
-// SIOCAIFADDR_IN6 is the same ioctl identifier as unix.SIOCAIFADDR adjusted with size of addrIfReq6
+// SIOCAIFADDR_IN6 is the same ioctlHandle identifier as unix.SIOCAIFADDR adjusted with size of addrIfReq6
 const SIOCAIFADDR_IN6 = (unix.SIOCAIFADDR & 0xe000ffff) | (uint(unsafe.Sizeof(addrIfReq6{})) << 16)
 const ND6_INFINITE_LIFETIME = 0xffffffff
 

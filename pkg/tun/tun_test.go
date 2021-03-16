@@ -119,6 +119,7 @@ func (ts *tunSuite) TestPtP() {
 				// Skip everything but ipv4 UDP requests to dnsIP port 53
 				h, err := ipv4.ParseHeader(buf)
 				require.NoError(err)
+				buf = buf[:h.TotalLen]
 				if h.Dst.Equal(testIP) && h.Protocol == udpProto {
 					// We've got an UDP package to our test destination
 					dg := udpDatagram(buf[h.Len:])
