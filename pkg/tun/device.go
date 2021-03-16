@@ -4,6 +4,12 @@ import (
 	"net"
 	"os"
 
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/buf"
+
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/ip"
+
+	"golang.org/x/net/ipv4"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -35,4 +41,56 @@ func addrToIp4(subnet *net.IPNet, to net.IP) (*net.IPNet, net.IP, bool) {
 		}
 	}
 	return nil, nil, false
+}
+
+func (d *Device) sendIPv4Fragments(b *buf.Buffer, l4HeaderOffset int, payload []byte) error {
+	payloadLen := len(payload) + l4HeaderOffset
+
+	h := ip.V4Header(b.Buf())
+
+	// maxPayLoadLen must be on even 8 byte boundary
+	maxPayloadLen := buf.MTU - h.HeaderLen()
+	maxPayloadLen -= maxPayloadLen % 8
+
+	if payloadLen <= maxPayloadLen {
+		// no fragments needed.
+		copy(h.Payload()[l4HeaderOffset:], payload)
+		h.SetTotalLen(h.HeaderLen() + payloadLen)
+		h.SetChecksum()
+		_, err := d.Write(b)
+		return err
+	}
+
+	payloadLen = maxPayloadLen - l4HeaderOffset
+	copy(h.Payload()[l4HeaderOffset:], payload[:payloadLen])
+
+	h.SetTotalLen(h.HeaderLen() + maxPayloadLen)
+	h.SetFlags(ipv4.MoreFragments)
+	h.SetChecksum()
+	if _, err := d.Write(b.Slice(0, h.TotalLen())); err != nil {
+		return err
+	}
+
+	fragmentOffset := maxPayloadLen
+	for {
+		payload = payload[payloadLen:]
+		payloadLen = len(payload)
+		lastFragment := payloadLen <= maxPayloadLen
+		if !lastFragment {
+			h.SetFlags(ipv4.MoreFragments)
+			payloadLen = maxPayloadLen
+		}
+		h.SetTotalLen(h.HeaderLen() + payloadLen)
+		copy(h.Payload(), payload[:payloadLen])
+
+		h.SetFragmentOffset(fragmentOffset / 8)
+		h.SetChecksum()
+		if _, err := d.Write(b.Slice(0, h.TotalLen())); err != nil {
+			return err
+		}
+		if lastFragment {
+			return nil
+		}
+		fragmentOffset += maxPayloadLen
+	}
 }

@@ -4,13 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"runtime"
-	"sync"
-	"syscall"
 	"unsafe"
+
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
+
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/buf"
 
 	"golang.org/x/sys/unix"
 )
@@ -33,14 +35,14 @@ func OpenTun() (*Device, error) {
 	info := &unix.CtlInfo{}
 	copy(info.Name[:], uTunControlName)
 	if err = unix.IoctlCtlInfo(fd, info); err != nil {
-		return nil, fmt.Errorf("failed to get IOCTL info: %w", err)
+		return nil, fmt.Errorf("failed to getBuffer IOCTL info: %w", err)
 	}
 
 	if err = unix.Connect(fd, &unix.SockaddrCtl{ID: info.Id, Unit: 0}); err != nil {
 		return nil, err
 	}
 
-	if err = syscall.SetNonblock(fd, true); err != nil {
+	if err = unix.SetNonblock(fd, true); err != nil {
 		return nil, err
 	}
 
@@ -48,7 +50,7 @@ func OpenTun() (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Device{os.NewFile(uintptr(fd), ""), name}, nil
+	return &Device{File: os.NewFile(uintptr(fd), ""), name: name}, nil
 }
 
 func (t *Device) AddSubnet(_ context.Context, subnet *net.IPNet, to net.IP) error {
@@ -73,51 +75,31 @@ func (t *Device) SetMTU(mtu int) error {
 	})
 }
 
-var bufPool = sync.Pool{New: func() interface{} {
-	return make([]byte, 0x1000)
-}}
-
-func (t *Device) Read(into []byte) (int, error) {
-	buf := bufPool.Get().([]byte)
-	if cap(buf) < len(into)+4 {
-		buf = make([]byte, len(into)+4)
+func (t *Device) Read(into *buf.Buffer) (int, error) {
+	n, err := t.File.Read(into.Raw())
+	if n >= buf.PrefixLen {
+		n -= buf.PrefixLen
 	}
-	defer bufPool.Put(buf)
-	rBuf := buf[:len(into)+4]
-	n, err := t.File.Read(rBuf)
-	if n < 4 {
-		if err == nil {
-			err = io.ErrUnexpectedEOF
-		}
-		return 0, err
-	}
-	copy(into, rBuf[4:])
-	return n - 4, err
+	return n, err
 }
 
-func (t *Device) Write(from []byte) (int, error) {
-	if len(from) == 0 {
-		return 0, syscall.EIO
+func (t *Device) Write(from *buf.Buffer) (int, error) {
+	raw := from.Raw()
+	if len(raw) <= buf.PrefixLen {
+		return 0, unix.EIO
 	}
 
-	buf := bufPool.Get().([]byte)
-	if cap(buf) < len(from)+4 {
-		buf = make([]byte, len(from)+4)
-	}
-	defer bufPool.Put(buf)
-
-	wBuf := buf[:len(from)+4]
-	ipVer := from[0] >> 4
-	if ipVer == 4 {
-		wBuf[3] = syscall.AF_INET
-	} else if ipVer == 6 {
-		wBuf[3] = syscall.AF_INET6
-	} else {
+	ipVer := raw[buf.PrefixLen] >> 4
+	switch ipVer {
+	case ipv4.Version:
+		raw[3] = unix.AF_INET
+	case ipv6.Version:
+		raw[3] = unix.AF_INET6
+	default:
 		return 0, errors.New("unable to determine IP version from packet")
 	}
-	copy(wBuf[4:], from)
-	n, err := t.File.Write(wBuf)
-	return n - 4, err
+	n, err := t.File.Write(raw)
+	return n - buf.PrefixLen, err
 }
 
 // Address structure for the SIOCAIFADDR ioctlHandle request

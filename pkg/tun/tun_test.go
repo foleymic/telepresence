@@ -1,23 +1,26 @@
 package tun
 
 import (
-	"bytes"
 	"context"
+	"fmt"
+	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
-	"sync"
-	"syscall"
 	"testing"
+	"time"
 
-	"golang.org/x/net/ipv4"
+	"github.com/datawire/dlib/dgroup"
 
-	"github.com/telepresenceio/telepresence/v2/pkg/subnet"
+	"github.com/datawire/dlib/dhttp"
 
-	"github.com/datawire/dlib/dlog"
+	"github.com/stretchr/testify/suite"
+	"golang.org/x/sys/unix"
 
 	"github.com/datawire/ambassador/pkg/dtest"
-	"github.com/stretchr/testify/suite"
+	"github.com/datawire/dlib/dlog"
+	"github.com/telepresenceio/telepresence/v2/pkg/subnet"
 )
 
 func TestTun(t *testing.T) {
@@ -29,8 +32,8 @@ func TestTun(t *testing.T) {
 
 type tunSuite struct {
 	suite.Suite
-	ctx context.Context
-	tun *Device
+	ctx        context.Context
+	dispatcher *Dispatcher
 }
 
 func (ts *tunSuite) SetupSuite() {
@@ -41,7 +44,7 @@ func (ts *tunSuite) SetupSuite() {
 	t.Cleanup(cancel)
 
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGABRT, syscall.SIGHUP)
+	signal.Notify(sigCh, unix.SIGINT, unix.SIGTERM, unix.SIGQUIT, unix.SIGABRT, unix.SIGHUP)
 	go func() {
 		<-sigCh
 		cancel()
@@ -51,46 +54,46 @@ func (ts *tunSuite) SetupSuite() {
 	require := ts.Require()
 	tun, err := OpenTun()
 	require.NoError(err, "Failed to open TUN device")
-	ts.tun = tun
+	ts.dispatcher = newDispatcher(tun, ts.fakeSocksDialer(ctx))
+	dlog.Debugf(ctx, "setup complete")
 }
 
-func (ts *tunSuite) reader() (<-chan []byte, <-chan error) {
-	buf := make([]byte, 0x400)
-	dataCh := make(chan []byte)
-	errCh := make(chan error)
+type fakeDialer struct {
+	addr string
+}
+
+func (f fakeDialer) Dial(network, addr string) (c net.Conn, err error) {
+	return net.Dial("tcp", f.addr)
+}
+
+func (f fakeDialer) DialContext(c context.Context, network, addr string) (net.Conn, error) {
+	dlog.Debugf(c, "dialing %s %s", network, addr)
+	dialer := net.Dialer{}
+	return dialer.DialContext(c, "tcp", f.addr)
+}
+
+// fakeSocksDialer creates a local service that just listens to "/" and echoes the host. A
+// dialer for the service is returned
+func (ts *tunSuite) fakeSocksDialer(c context.Context) fakeDialer {
+	mux := http.NewServeMux()
+	c = dgroup.WithGoroutineName(c, "socks service")
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		dlog.Debugf(c, "http serving %s", r.Host)
+		fmt.Fprintln(w, r.Host)
+	})
+
+	lc := net.ListenConfig{}
+	l, err := lc.Listen(c, "tcp", "127.0.0.1:0")
+	ts.Require().NoError(err)
+
 	go func() {
-		for {
-			n, err := ts.tun.Read(buf)
-			if err != nil {
-				errCh <- err
-			} else {
-				dataCh <- buf[:n]
-			}
-		}
+		srv := &dhttp.ServerConfig{Handler: mux}
+		_ = srv.Serve(c, l)
 	}()
-	return dataCh, errCh
+	return fakeDialer{l.Addr().String()}
 }
 
-func (ts *tunSuite) writer(dataChan <-chan []byte) {
-	go func() {
-		for {
-			select {
-			case buf := <-dataChan:
-				_, err := ts.tun.Write(buf)
-				if err != nil {
-					if ts.ctx.Err() != nil {
-						err = nil
-					}
-					return
-				}
-			case <-ts.ctx.Done():
-				return
-			}
-		}
-	}()
-}
-
-func (ts *tunSuite) TestPtP() {
+func (ts *tunSuite) TestTunnel() {
 	require := ts.Require()
 	addr, err := subnet.FindAvailableClassC()
 	require.NoError(err)
@@ -103,55 +106,22 @@ func (ts *tunSuite) TestPtP() {
 	copy(testIP, addr.IP)
 	testIP[3] = 123
 
-	testData := []byte("some stuff")
-	testDataReceived := false
+	require.NoError(ts.dispatcher.dev.AddSubnet(ts.ctx, addr, to))
 
-	require.NoError(ts.tun.AddSubnet(ts.ctx, addr, to))
-
-	dataChan, errChan := ts.reader()
-	wg := sync.WaitGroup{}
-	wg.Add(1)
 	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case buf := <-dataChan:
-				// Skip everything but ipv4 UDP requests to dnsIP port 53
-				h, err := ipv4.ParseHeader(buf)
-				require.NoError(err)
-				buf = buf[:h.TotalLen]
-				if h.Dst.Equal(testIP) && h.Protocol == udpProto {
-					// We've got an UDP package to our test destination
-					dg := udpDatagram(buf[h.Len:])
-					if dg.destination() == 8080 {
-						testDataReceived = bytes.Equal(testData, dg.body())
-						return
-					}
-				}
-				dlog.Info(ts.ctx, h)
-			case <-ts.ctx.Done():
-				dlog.Info(ts.ctx, "context cancelled")
-				return
-			case err = <-errChan:
-				if ts.ctx.Err() == nil {
-					require.NoError(err)
-				}
-				return
-			}
-		}
+		ts.NoError(ts.dispatcher.Run(ts.ctx))
 	}()
 
-	conn, err := net.Dial("udp", testIP.String()+":8080")
+	dlog.Debugf(ts.ctx, "http://%s:8080/", testIP)
+	client := http.Client{Timeout: time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://%s:8080/", testIP))
 	require.NoError(err)
-	defer conn.Close()
-	_, err = conn.Write(testData)
+	defer resp.Body.Close()
+	data, err := ioutil.ReadAll(resp.Body)
 	require.NoError(err)
-	wg.Wait()
-	require.True(testDataReceived)
+	ts.dispatcher.Stop(ts.ctx)
+	dlog.Info(ts.ctx, string(data))
 }
 
 func (ts *tunSuite) TearDownSuite() {
-	if ts.tun != nil {
-		ts.tun.Close()
-	}
 }

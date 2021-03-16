@@ -12,6 +12,7 @@ import (
 )
 
 const devicePath = "/dev/net/tun"
+const bufferPrefixLen = 0
 
 func OpenTun() (*Device, error) {
 	// https://www.kernel.org/doc/Documentation/networking/tuntap.txt
@@ -126,6 +127,14 @@ func (t *Device) setAddr(subnet *net.IPNet, to net.IP) error {
 		runtime.KeepAlive(&addressRequest)
 		return err
 	})
+}
+
+func (t *Device) Read(into *Buffer, n int) (int, error) {
+	return t.File.Read(into.Raw()[:n])
+}
+
+func (t *Device) Write(from *Buffer) (int, error) {
+	return t.File.Write(into.Raw())
 }
 
 func ioctl(socket int, request uint, requestData unsafe.Pointer) error {

@@ -27,5 +27,6 @@ func OpenTun() (io.ReadWriteCloser, string, error) {
 	//
 	// See: https://github.com/golang/go/issues/30426#issuecomment-470044803
 	_ = unix.SetNonblock(fd, true)
-	return os.NewFile(uintptr(fd), name), name, nil
+	wrapper := os.NewFile(uintptr(fd), name)
+	return wrapper, name, nil
 }
