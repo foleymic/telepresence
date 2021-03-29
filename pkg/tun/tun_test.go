@@ -54,7 +54,7 @@ func (ts *tunSuite) SetupSuite() {
 	require := ts.Require()
 	tun, err := OpenTun()
 	require.NoError(err, "Failed to open TUN device")
-	ts.dispatcher = newDispatcher(tun, ts.fakeSocksDialer(ctx))
+	ts.dispatcher = NewDispatcher(tun, ts.fakeSocksDialer(ctx))
 	dlog.Debugf(ctx, "setup complete")
 }
 

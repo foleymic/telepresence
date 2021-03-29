@@ -1,4 +1,4 @@
-package buf
+package buffer
 
 import (
 	"sync"
@@ -13,12 +13,12 @@ type Pool struct {
 	sync.Pool
 }
 
-func (p *Pool) GetBuffer(size int) *Buffer {
-	b := p.Get().(*Buffer)
+func (p *Pool) GetData(size int) *Data {
+	b := p.Get().(*Data)
 	b.SetLength(size)
 	return b
 }
 
-func (p *Pool) PutBuffer(b *Buffer) {
+func (p *Pool) PutBuffer(b *Data) {
 	p.Put(b)
 }

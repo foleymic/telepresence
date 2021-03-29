@@ -1,4 +1,4 @@
-package buf
+package buffer
 
 import (
 	"sync"
@@ -6,16 +6,16 @@ import (
 
 const PrefixLen = 4
 
-type Buffer struct {
+type Data struct {
 	buf []byte
 	raw []byte
 }
 
-func (b *Buffer) Buf() []byte {
+func (b *Data) Buf() []byte {
 	return b.buf
 }
 
-func (b *Buffer) SetLength(l int) {
+func (b *Data) SetLength(l int) {
 	if l > cap(b.buf) {
 		b.raw = make([]byte, l+PrefixLen)
 		b.buf = b.raw[PrefixLen:]
@@ -25,30 +25,30 @@ func (b *Buffer) SetLength(l int) {
 	}
 }
 
-func (b *Buffer) Append(o *Buffer) *Buffer {
+func (b *Data) Append(o *Data) *Data {
 	raw := make([]byte, len(b.raw)+len(o.buf))
 	copy(raw, b.raw)
 	copy(raw[len(b.raw):], o.buf)
-	return &Buffer{buf: raw[PrefixLen:], raw: raw}
+	return &Data{buf: raw[PrefixLen:], raw: raw}
 }
 
-func (b *Buffer) Copy() *Buffer {
+func (b *Data) Copy() *Data {
 	raw := make([]byte, len(b.raw))
 	copy(raw, b.raw)
-	return &Buffer{buf: raw[PrefixLen:], raw: raw}
+	return &Data{buf: raw[PrefixLen:], raw: raw}
 }
 
-func (b *Buffer) Slice(start, end int) *Buffer {
+func (b *Data) Slice(start, end int) *Data {
 	raw := b.raw[PrefixLen+start : PrefixLen+end]
-	return &Buffer{buf: raw[PrefixLen:], raw: raw}
+	return &Data{buf: raw[PrefixLen:], raw: raw}
 }
 
-func (b *Buffer) Raw() []byte {
+func (b *Data) Raw() []byte {
 	return b.raw
 }
 
 var DataPool = &Pool{Pool: sync.Pool{
 	New: func() interface{} {
 		raw := make([]byte, PrefixLen+Size)
-		return &Buffer{buf: raw[PrefixLen:], raw: raw}
+		return &Data{buf: raw[PrefixLen:], raw: raw}
 	}}}

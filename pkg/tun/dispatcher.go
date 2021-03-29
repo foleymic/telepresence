@@ -3,56 +3,49 @@ package tun
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 
-	"github.com/telepresenceio/telepresence/v2/pkg/tun/buf"
-	"github.com/telepresenceio/telepresence/v2/pkg/tun/ip"
-
-	"github.com/telepresenceio/telepresence/v2/pkg/tun/tcp"
-
-	ip2 "github.com/telepresenceio/telepresence/v2/pkg/tun/ip"
-
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 	"golang.org/x/net/proxy"
-
 	"golang.org/x/sys/unix"
 
-	"golang.org/x/net/ipv4"
-
-	"golang.org/x/net/ipv6"
-
-	"github.com/datawire/dlib/dlog"
-
 	"github.com/datawire/dlib/dgroup"
+	"github.com/datawire/dlib/dlog"
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/buffer"
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/ip"
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/tcp"
 )
 
 type Dispatcher struct {
 	dev         *Device
 	socksDialer proxy.Dialer
-	udpHandlers map[ip2.ConnID]*udpHandler
-	tcpHandlers map[ip2.ConnID]*tcp.ConnTrack
+	udpHandlers map[ip.ConnID]*udpHandler
+	tcpHandlers map[ip.ConnID]*tcp.Workflow
 	handlersWg  sync.WaitGroup
 	toTunCh     chan interface{}
 	lock        sync.Mutex
 }
 
-func newDispatcher(dev *Device, socksDialer proxy.Dialer) *Dispatcher {
+func NewDispatcher(dev *Device, socksDialer proxy.Dialer) *Dispatcher {
 	return &Dispatcher{
 		dev:         dev,
 		socksDialer: socksDialer,
-		udpHandlers: make(map[ip2.ConnID]*udpHandler),
-		tcpHandlers: make(map[ip2.ConnID]*tcp.ConnTrack),
+		udpHandlers: make(map[ip.ConnID]*udpHandler),
+		tcpHandlers: make(map[ip.ConnID]*tcp.Workflow),
 		toTunCh:     make(chan interface{}),
 	}
 }
 
-func (d *Dispatcher) deleteHandler(id ip2.ConnID) {
+func (d *Dispatcher) deleteHandler(id ip.ConnID) {
 	d.lock.Lock()
 	delete(d.udpHandlers, id)
 	d.lock.Unlock()
 }
 
-func newSocksDialer(port int) (proxy.Dialer, error) {
-	return proxy.SOCKS5("tcp", fmt.Sprintf("localhost:%d", port), nil, proxy.Direct)
+func NewSocksDialer(port int) (proxy.Dialer, error) {
+	return proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", port), nil, proxy.Direct)
 }
 
 func (d *Dispatcher) Stop(c context.Context) {
@@ -60,6 +53,7 @@ func (d *Dispatcher) Stop(c context.Context) {
 		handler.Close(c)
 	}
 	d.handlersWg.Wait()
+	d.dev.Close()
 }
 
 func (d *Dispatcher) Run(c context.Context) error {
@@ -75,8 +69,8 @@ func (d *Dispatcher) Run(c context.Context) error {
 				switch pkt := pkt.(type) {
 				case *tcp.Packet:
 					dlog.Debugf(c, "write to TUN: %s", pkt)
-					_, err := d.dev.Write(pkt.MTUBuf)
-					buf.DataPool.PutBuffer(pkt.MTUBuf)
+					_, err := d.dev.Write(pkt.Data())
+					buffer.DataPool.PutBuffer(pkt.Data())
 					if err != nil {
 						if c.Err() != nil {
 							err = nil
@@ -100,9 +94,9 @@ func (d *Dispatcher) Run(c context.Context) error {
 	})
 
 	g.Go("reader", func(c context.Context) error {
-		fragmentMap := make(map[uint16][]*buf.Buffer)
+		fragmentMap := make(map[uint16][]*buffer.Data)
 		for {
-			data := buf.DataPool.GetBuffer(buf.Size)
+			data := buffer.DataPool.GetData(buffer.Size)
 			n, err := d.dev.Read(data)
 			if err != nil {
 				return fmt.Errorf("read packet error: %v", err)
@@ -114,17 +108,17 @@ func (d *Dispatcher) Run(c context.Context) error {
 			hdr, err := ip.ParseHeader(data.Buf())
 			if err != nil {
 				dlog.Error(c, "Unable to parse package header")
-				buf.DataPool.PutBuffer(data)
+				buffer.DataPool.PutBuffer(data)
 				continue
 			}
 
 			if hdr.Version() == ipv6.Version {
 				dlog.Error(c, "IPv6 is not yet handled by this dispatcher")
-				buf.DataPool.PutBuffer(data)
+				buffer.DataPool.PutBuffer(data)
 				continue
 			}
 
-			ipHdr := hdr.(ip2.V4Header)
+			ipHdr := hdr.(ip.V4Header)
 			if ipHdr.Flags()&ipv4.MoreFragments != 0 || ipHdr.FragmentOffset() != 0 {
 				data = ipHdr.ProcessFragment(data, fragmentMap)
 				if data == nil {
@@ -136,20 +130,20 @@ func (d *Dispatcher) Run(c context.Context) error {
 			switch ipHdr.L4Protocol() {
 			case unix.IPPROTO_TCP:
 				// data is handed over to dispatcher.
-				d.tcp(c, &tcp.Packet{IPHeader: ipHdr, MTUBuf: data})
+				d.tcp(c, tcp.MakePacket(ipHdr, data))
 			case unix.IPPROTO_UDP:
 				dlog.Debugf(c, "discarding UDP package to %s:%d", ipHdr.Destination(), udpDatagram(ipHdr.Payload()).destination())
-				buf.DataPool.PutBuffer(data)
+				buffer.DataPool.PutBuffer(data)
 			default:
-				buf.DataPool.PutBuffer(data)
+				buffer.DataPool.PutBuffer(data)
 			}
 		}
 	})
 	return g.Wait()
 }
 
-func (d *Dispatcher) createTCPConnTrack(c context.Context, id ip2.ConnID) *tcp.ConnTrack {
-	track := tcp.NewConnTrack(d.socksDialer.(proxy.ContextDialer), d.toTunCh, id, func() {
+func (d *Dispatcher) createTCPConnTrack(c context.Context, id ip.ConnID) *tcp.Workflow {
+	track := tcp.NewWorkflow(d.socksDialer.(proxy.ContextDialer), d.toTunCh, id, func() {
 		d.clearTCPConnTrack(c, id)
 	})
 	d.lock.Lock()
@@ -162,14 +156,14 @@ func (d *Dispatcher) createTCPConnTrack(c context.Context, id ip2.ConnID) *tcp.C
 	return track
 }
 
-func (d *Dispatcher) getTCPConnTrack(id ip2.ConnID) *tcp.ConnTrack {
+func (d *Dispatcher) getTCPConnTrack(id ip.ConnID) *tcp.Workflow {
 	d.lock.Lock()
 	handler := d.tcpHandlers[id]
 	d.lock.Unlock()
 	return handler
 }
 
-func (d *Dispatcher) clearTCPConnTrack(c context.Context, id ip2.ConnID) {
+func (d *Dispatcher) clearTCPConnTrack(c context.Context, id ip.ConnID) {
 	d.lock.Lock()
 	delete(d.tcpHandlers, id)
 	count := len(d.tcpHandlers)
@@ -178,9 +172,9 @@ func (d *Dispatcher) clearTCPConnTrack(c context.Context, id ip2.ConnID) {
 }
 
 func (d *Dispatcher) tcp(c context.Context, pkt *tcp.Packet) {
-	ipHdr := pkt.IPHeader
+	ipHdr := pkt.IPHeader()
 	tcpHdr := pkt.Header()
-	connID := ip2.NewConnID(ipHdr, tcpHdr.SourcePort(), tcpHdr.DestinationPort())
+	connID := ip.NewConnID(ipHdr, tcpHdr.SourcePort(), tcpHdr.DestinationPort())
 	track := d.getTCPConnTrack(connID)
 	if track == nil {
 		// ignore RST, if there is no track of this connection
@@ -200,4 +194,16 @@ func (d *Dispatcher) tcp(c context.Context, pkt *tcp.Packet) {
 		track = d.createTCPConnTrack(c, connID)
 	}
 	track.NewPacket(c, pkt)
+}
+
+func (d *Dispatcher) AddSubnets(c context.Context, subnets []*net.IPNet) error {
+	for _, sn := range subnets {
+		to := make(net.IP, len(sn.IP))
+		copy(to, sn.IP)
+		to[len(to)-1] = 1
+		if err := d.dev.AddSubnet(c, sn, to); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -10,13 +10,13 @@ import (
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
 
-	"github.com/telepresenceio/telepresence/v2/pkg/tun/buf"
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/buffer"
 	"github.com/telepresenceio/telepresence/v2/pkg/tun/ip"
 )
 
 type Packet struct {
-	IPHeader ip.Header
-	MTUBuf   *buf.Buffer
+	ipHdr ip.Header
+	data  *buffer.Data
 }
 
 var ipID uint32
@@ -25,35 +25,47 @@ func NextID() int {
 	return int(atomic.AddUint32(&ipID, 1) & 0x0000ffff)
 }
 
+func MakePacket(ipHdr ip.Header, data *buffer.Data) *Packet {
+	return &Packet{ipHdr: ipHdr, data: data}
+}
+
 func NewIPPacket(ipPayloadLen int, src, dst net.IP) *Packet {
 	pkg := Packet{}
 	if len(src) == 4 && len(dst) == 4 {
-		pkg.MTUBuf = buf.DataPool.GetBuffer(ipPayloadLen + ipv4.HeaderLen)
-		iph := ip.V4Header(pkg.MTUBuf.Buf())
+		pkg.data = buffer.DataPool.GetData(ipPayloadLen + ipv4.HeaderLen)
+		iph := ip.V4Header(pkg.data.Buf())
 		iph.Initialize()
 		iph.SetID(NextID())
-		pkg.IPHeader = iph
+		pkg.ipHdr = iph
 	} else {
-		pkg.MTUBuf = buf.DataPool.GetBuffer(ipPayloadLen + ipv6.HeaderLen)
-		iph := ip.V6Header(pkg.MTUBuf.Buf())
+		pkg.data = buffer.DataPool.GetData(ipPayloadLen + ipv6.HeaderLen)
+		iph := ip.V6Header(pkg.data.Buf())
 		iph.Initialize()
-		pkg.IPHeader = iph
+		pkg.ipHdr = iph
 	}
-	iph := pkg.IPHeader
+	iph := pkg.ipHdr
 	iph.SetSource(src)
 	iph.SetDestination(dst)
 	iph.SetTTL(64)
-	iph.SetTotalLen(iph.HeaderLen() + ipPayloadLen)
+	iph.SetPayloadLen(ipPayloadLen)
 	return &pkg
 }
 
+func (p *Packet) IPHeader() ip.Header {
+	return p.ipHdr
+}
+
 func (p *Packet) Header() Header {
-	return p.IPHeader.Payload()
+	return p.ipHdr.Payload()
+}
+
+func (p *Packet) Data() *buffer.Data {
+	return p.data
 }
 
 func (p *Packet) String() string {
 	b := bytes.Buffer{}
-	ipHdr := p.IPHeader
+	ipHdr := p.ipHdr
 	tcpHdr := p.Header()
 	fmt.Fprintf(&b, "tcp sq %.3d, an %.3d, %s.%d -> %s.%d, flags=",
 		tcpHdr.Sequence(), tcpHdr.AckNumber(), ipHdr.Source(), tcpHdr.SourcePort(), ipHdr.Destination(), tcpHdr.DestinationPort())
@@ -67,11 +79,11 @@ func (p *Packet) String() string {
 }
 
 func (p *Packet) Reset() *Packet {
-	incIp := p.IPHeader
+	incIp := p.ipHdr
 	incTcp := p.Header()
 
 	pkt := NewIPPacket(HeaderLen, incIp.Source(), incIp.Destination())
-	iph := pkt.IPHeader
+	iph := pkt.ipHdr
 	iph.SetL4Protocol(unix.IPPROTO_TCP)
 	iph.SetChecksum()
 

@@ -7,10 +7,9 @@ import (
 	"net"
 	"sort"
 
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/buffer"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
-
-	"github.com/telepresenceio/telepresence/v2/pkg/tun/buf"
 )
 
 type Header interface {
@@ -52,8 +51,8 @@ type Header interface {
 	// SetL4Protocol sets the layer 4 protocol
 	SetL4Protocol(int)
 
-	// SetTotalLen sets the total length (header + payload)
-	SetTotalLen(int)
+	// SetPayloadLen sets the length of the payload
+	SetPayloadLen(int)
 
 	// SetChecksum computes the checksum for this header. No further modifications must be made once this is called.
 	// This method is a no-op for ipv6.
@@ -121,8 +120,8 @@ func (h V4Header) TotalLen() int {
 	return int(binary.BigEndian.Uint16(h[2:]))
 }
 
-func (h V4Header) SetTotalLen(len int) {
-	binary.BigEndian.PutUint16(h[2:], uint16(len))
+func (h V4Header) SetPayloadLen(len int) {
+	binary.BigEndian.PutUint16(h[2:], uint16(len+h.HeaderLen()))
 }
 
 func (h V4Header) ID() uint16 {
@@ -226,6 +225,9 @@ func (h V4Header) Payload() []byte {
 }
 
 func (h V4Header) SetChecksum() {
+	h[10] = 0 // clear current checksum
+	h[11] = 0
+
 	s := 0
 	t := h.HeaderLen()
 	for i := 0; i < t; i += 2 {
@@ -250,7 +252,7 @@ func (h V4Header) PseudoHeader(l4Proto int) []byte {
 	return b
 }
 
-func (h V4Header) ProcessFragment(data *buf.Buffer, fragsMap map[uint16][]*buf.Buffer) *buf.Buffer {
+func (h V4Header) ProcessFragment(data *buffer.Data, fragsMap map[uint16][]*buffer.Data) *buffer.Data {
 	if h.Flags()&ipv4.MoreFragments == 0 && h.FragmentOffset() == 0 {
 		return data
 	}
@@ -258,7 +260,7 @@ func (h V4Header) ProcessFragment(data *buf.Buffer, fragsMap map[uint16][]*buf.B
 	exist, ok := fragsMap[h.ID()]
 	if !ok {
 		// first fragment
-		fragsMap[h.ID()] = []*buf.Buffer{data}
+		fragsMap[h.ID()] = []*buffer.Data{data}
 		return nil
 	}
 
@@ -293,18 +295,18 @@ func (h V4Header) ProcessFragment(data *buf.Buffer, fragsMap map[uint16][]*buf.B
 	totalPayload := expectedOffset + lastPayload
 	firstHeader := V4Header(exist[0].Buf())
 
-	final := buf.DataPool.GetBuffer(firstHeader.HeaderLen() + totalPayload)
+	final := buffer.DataPool.GetData(firstHeader.HeaderLen() + totalPayload)
 	fb := final.Buf()
 	copy(fb[:firstHeader.HeaderLen()], firstHeader)
 	offset := firstHeader.HeaderLen()
 	for _, data := range exist {
 		eh := V4Header(data.Buf())
 		copy(fb[offset+eh.FragmentOffset()*8:], eh.Payload())
-		buf.DataPool.PutBuffer(data)
+		buffer.DataPool.PutBuffer(data)
 	}
 	firstHeader = fb
 	firstHeader.SetFlags(firstHeader.Flags() &^ ipv4.MoreFragments)
-	firstHeader.SetTotalLen(firstHeader.HeaderLen() + totalPayload)
+	firstHeader.SetPayloadLen(firstHeader.HeaderLen() + totalPayload)
 	firstHeader.SetChecksum()
 	return final
 }
@@ -374,8 +376,8 @@ func (h V6Header) TotalLen() int {
 	return ipv6.HeaderLen + h.PayloadLen()
 }
 
-func (h V6Header) SetTotalLen(tl int) {
-	binary.BigEndian.PutUint16(h[4:], uint16(tl)-ipv6.HeaderLen)
+func (h V6Header) SetPayloadLen(tl int) {
+	binary.BigEndian.PutUint16(h[4:], uint16(tl))
 }
 
 func (h V6Header) SetL4Protocol(proto int) {
@@ -404,7 +406,7 @@ func (h V6Header) PseudoHeader(l4Proto int) []byte {
 	return b
 }
 
-func (h V6Header) ProcessFragments(data *buf.Buffer, fragsMap map[uint16][]*buf.Buffer) *buf.Buffer {
+func (h V6Header) ProcessFragments(data *buffer.Data, fragsMap map[uint16][]*buffer.Data) *buffer.Data {
 	// TODO: Implement based on Extension headers
 	return nil
 }

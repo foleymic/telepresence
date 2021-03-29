@@ -9,10 +9,9 @@ import (
 	"runtime"
 	"unsafe"
 
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/buffer"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
-
-	"github.com/telepresenceio/telepresence/v2/pkg/tun/buf"
 
 	"golang.org/x/sys/unix"
 )
@@ -75,21 +74,21 @@ func (t *Device) SetMTU(mtu int) error {
 	})
 }
 
-func (t *Device) Read(into *buf.Buffer) (int, error) {
+func (t *Device) Read(into *buffer.Data) (int, error) {
 	n, err := t.File.Read(into.Raw())
-	if n >= buf.PrefixLen {
-		n -= buf.PrefixLen
+	if n >= buffer.PrefixLen {
+		n -= buffer.PrefixLen
 	}
 	return n, err
 }
 
-func (t *Device) Write(from *buf.Buffer) (int, error) {
+func (t *Device) Write(from *buffer.Data) (int, error) {
 	raw := from.Raw()
-	if len(raw) <= buf.PrefixLen {
+	if len(raw) <= buffer.PrefixLen {
 		return 0, unix.EIO
 	}
 
-	ipVer := raw[buf.PrefixLen] >> 4
+	ipVer := raw[buffer.PrefixLen] >> 4
 	switch ipVer {
 	case ipv4.Version:
 		raw[3] = unix.AF_INET
@@ -99,7 +98,7 @@ func (t *Device) Write(from *buf.Buffer) (int, error) {
 		return 0, errors.New("unable to determine IP version from packet")
 	}
 	n, err := t.File.Write(raw)
-	return n - buf.PrefixLen, err
+	return n - buffer.PrefixLen, err
 }
 
 // Address structure for the SIOCAIFADDR ioctlHandle request

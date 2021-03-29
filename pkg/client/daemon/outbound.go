@@ -11,14 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
-
 	"github.com/datawire/dlib/dcontext"
 	"github.com/datawire/dlib/dlog"
 	rpc "github.com/telepresenceio/telepresence/rpc/v2/daemon"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/daemon/dns"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/daemon/nat"
-	"github.com/telepresenceio/telepresence/v2/pkg/client/daemon/proxy"
 )
 
 // outbound does stuff, idk, I didn't write it.
@@ -88,13 +85,18 @@ func newOutbound(c context.Context, name string, dnsIP, fallbackIP string, noSea
 	// seed random generator (used when shuffling IPs)
 	rand.Seed(time.Now().UnixNano())
 
+	router, err := NewTunRouter()
+	if err != nil {
+		return nil, err
+	}
+
 	ret := &outbound{
 		dnsListener: listener,
 		dnsIP:       dnsIP,
 		fallbackIP:  fallbackIP,
 		noSearch:    noSearch,
 		tables:      make(map[string]*nat.Table),
-		translator:  nat.NewRouter(name, net.IP{127, 0, 0, 1}, net.IPv6loopback),
+		translator:  router,
 		namespaces:  make(map[string]struct{}),
 		domains:     make(map[string][]string),
 		search:      []string{""},
@@ -110,21 +112,25 @@ func newOutbound(c context.Context, name string, dnsIP, fallbackIP string, noSea
 // we make special syscalls/ioctls to determine where each connection was originally bound for, so
 // that we know what to tell SOCKS.
 func (o *outbound) firewall2socksWorker(c context.Context, onReady func()) error {
-	// hmm, we may not actually need to get the original
-	// destination, we could just forward each ip to a unique port
-	// and either listen on that port or run port-forward
-	pr, err := proxy.NewProxy(c, o.destination)
-	if err != nil {
-		return errors.Wrap(err, "Proxy")
-	}
-	o.proxyRedirPort, err = pr.ListenerPort()
-	if err != nil {
-		return errors.Wrap(err, "Proxy")
-	}
-	dlog.Debug(c, "Starting server")
+	/*
+		// hmm, we may not actually need to get the original
+		// destination, we could just forward each ip to a unique port
+		// and either listen on that port or run port-forward
+		pr, err := proxy.NewProxy(c, o.destination)
+		if err != nil {
+			return errors.Wrap(err, "Proxy")
+		}
+		o.proxyRedirPort, err = pr.ListenerPort()
+		if err != nil {
+			return errors.Wrap(err, "Proxy")
+		}
+		dlog.Debug(c, "Starting server")
+		onReady()
+		pr.Run(c, 10000)
+		dlog.Debug(c, "Server done")
+	*/
 	onReady()
-	pr.Run(c, 10000)
-	dlog.Debug(c, "Server done")
+	<-c.Done()
 	return nil
 }
 

@@ -5,9 +5,8 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/buffer"
 	"github.com/telepresenceio/telepresence/v2/pkg/tun/tcp"
-
-	"github.com/telepresenceio/telepresence/v2/pkg/tun/buf"
 
 	"github.com/telepresenceio/telepresence/v2/pkg/tun/ip"
 
@@ -65,7 +64,7 @@ type udpPacket []byte
 
 func (d *Device) sendIPv4ResponseUDP(local net.IP, remote net.IP, lPort uint16, rPort uint16, payload []byte) error {
 	packageID := tcp.NextID()
-	mtuBuf := buf.DataPool.GetBuffer(ipv4.HeaderLen + udpHeaderLen + len(payload))
+	mtuBuf := buffer.DataPool.GetData(ipv4.HeaderLen + udpHeaderLen + len(payload))
 	ipHdr := ip.V4Header(mtuBuf.Buf())
 	ipHdr.Initialize()
 	ipHdr.SetID(packageID)
