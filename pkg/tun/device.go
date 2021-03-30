@@ -48,7 +48,7 @@ func (d *Device) sendIPv4Fragments(b *buffer.Data, l4HeaderOffset int, payload [
 	h := ip.V4Header(b.Buf())
 
 	// maxPayLoadLen must be on even 8 byte boundary
-	maxPayloadLen := buffer.MTU - h.HeaderLen()
+	maxPayloadLen := buffer.DataPool.MTU - h.HeaderLen()
 	maxPayloadLen -= maxPayloadLen % 8
 
 	if payloadLen <= maxPayloadLen {
@@ -66,7 +66,7 @@ func (d *Device) sendIPv4Fragments(b *buffer.Data, l4HeaderOffset int, payload [
 	h.SetPayloadLen(h.HeaderLen() + maxPayloadLen)
 	h.SetFlags(ipv4.MoreFragments)
 	h.SetChecksum()
-	if _, err := d.Write(b.Slice(0, h.TotalLen())); err != nil {
+	if _, err := d.Write(b.Slice(0, h.HeaderLen()+h.PayloadLen())); err != nil {
 		return err
 	}
 
@@ -84,7 +84,7 @@ func (d *Device) sendIPv4Fragments(b *buffer.Data, l4HeaderOffset int, payload [
 
 		h.SetFragmentOffset(fragmentOffset / 8)
 		h.SetChecksum()
-		if _, err := d.Write(b.Slice(0, h.TotalLen())); err != nil {
+		if _, err := d.Write(b.Slice(0, h.HeaderLen()+h.PayloadLen())); err != nil {
 			return err
 		}
 		if lastFragment {

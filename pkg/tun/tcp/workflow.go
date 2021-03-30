@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/datawire/dlib/dlog"
+	"github.com/datawire/dlib/dtime"
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/tun/buffer"
 	"github.com/telepresenceio/telepresence/v2/pkg/tun/ip"
@@ -25,7 +26,7 @@ type state int32
 
 const (
 	// simplified server-side tcp states
-	stateClosed state = iota
+	stateIdle state = iota
 	stateSynReceived
 	stateEstablished
 	stateFinWait1
@@ -34,8 +35,9 @@ const (
 	stateLastACK
 )
 
-const maxReceiveWindow int = 65535
-const maxSendWindow int = 65535
+const maxReceiveWindow = 65535
+const maxSendWindow = 65535
+const ioChannelSize = 0x400
 
 type Workflow struct {
 	id          ip.ConnID
@@ -44,7 +46,6 @@ type Workflow struct {
 	toTun       chan<- interface{}
 	fromTun     chan *Packet
 	toSocks     chan *Packet
-	ackCh       chan struct{}
 	closeCh     chan error
 
 	socksConn net.Conn
@@ -57,8 +58,6 @@ type Workflow struct {
 	rcvWnd  int32
 
 	lstAck uint32
-
-	windowCond *sync.Cond
 }
 
 func (c *Workflow) state() state {
@@ -101,20 +100,20 @@ func (c *Workflow) setLastAck(v uint32) {
 	atomic.StoreUint32(&c.lstAck, v)
 }
 
-func (c *Workflow) sendWindow() int32 {
-	return atomic.LoadInt32(&c.sendWnd)
+func (c *Workflow) sendWindow() uint16 {
+	return uint16(atomic.LoadInt32(&c.sendWnd))
 }
 
-func (c *Workflow) setSendWindow(v int32) {
-	atomic.StoreInt32(&c.sendWnd, v)
+func (c *Workflow) setSendWindow(v uint16) {
+	atomic.StoreInt32(&c.sendWnd, int32(v))
 }
 
-func (c *Workflow) receiveWindow() int32 {
-	return atomic.LoadInt32(&c.rcvWnd)
+func (c *Workflow) receiveWindow() uint16 {
+	return uint16(atomic.LoadInt32(&c.rcvWnd))
 }
 
-func (c *Workflow) setReceiveWindow(v int32) {
-	atomic.StoreInt32(&c.rcvWnd, v)
+func (c *Workflow) setReceiveWindow(v uint16) {
+	atomic.StoreInt32(&c.rcvWnd, int32(v))
 }
 
 func NewWorkflow(socksDialer proxy.ContextDialer, toTunCh chan<- interface{}, id ip.ConnID, remove func()) *Workflow {
@@ -123,15 +122,12 @@ func NewWorkflow(socksDialer proxy.ContextDialer, toTunCh chan<- interface{}, id
 		remove:      remove,
 		socksDialer: socksDialer,
 		toTun:       toTunCh,
-		fromTun:     make(chan *Packet, 0x400),
-		toSocks:     make(chan *Packet, 0x400),
-		ackCh:       make(chan struct{}, 0x40),
+		fromTun:     make(chan *Packet, ioChannelSize),
+		toSocks:     make(chan *Packet, ioChannelSize),
 		closeCh:     make(chan error, 5),
-
-		sendWnd:    int32(maxSendWindow),
-		rcvWnd:     int32(maxReceiveWindow),
-		windowCond: &sync.Cond{L: &sync.Mutex{}},
-		wfState:    stateClosed,
+		sendWnd:     int32(maxSendWindow),
+		rcvWnd:      int32(maxReceiveWindow),
+		wfState:     stateIdle,
 	}
 }
 
@@ -143,16 +139,31 @@ func (c *Workflow) NewPacket(ctx context.Context, pkt *Packet) {
 	}
 }
 
-func (c *Workflow) Close(_ context.Context) {
-	c.closeCh <- errQuitByOther
+func (c *Workflow) Run(ctx context.Context, wg *sync.WaitGroup) {
+	defer func() {
+		if c.socksConn != nil {
+			c.socksConn.Close()
+		}
+		c.remove()
+		wg.Done()
+	}()
+	c.processPackets(ctx)
 }
 
-func (c *Workflow) validAck(tcpHdr Header) bool {
-	return tcpHdr.AckNumber() == c.nextSequence()
+func (c *Workflow) Close(ctx context.Context) {
+	select {
+	case <-ctx.Done():
+	case c.closeCh <- errQuitByUs:
+	}
 }
 
-func (c *Workflow) validSeq(tcpHdr Header) bool {
-	return tcpHdr.Sequence() == c.receiveNextSequence()
+func (c *Workflow) adjustReceiveWindow() {
+	queueSize := len(c.toSocks)
+	windowSize := maxReceiveWindow
+	if queueSize > ioChannelSize/4 {
+		windowSize -= queueSize * (maxReceiveWindow / ioChannelSize)
+	}
+	c.setReceiveWindow(uint16(windowSize))
 }
 
 func (c *Workflow) sendToSocks(ctx context.Context, pkt *Packet) bool {
@@ -160,16 +171,8 @@ func (c *Workflow) sendToSocks(ctx context.Context, pkt *Packet) bool {
 	select {
 	case c.toSocks <- pkt:
 		c.addReceiveNextSequence(payloadLen)
-		c.ackCh <- struct{}{}
-
-		// reduce window when recved
-		wnd := c.receiveWindow()
-		wnd -= int32(payloadLen)
-		if wnd < 0 {
-			wnd = 0
-		}
-		c.setReceiveWindow(wnd)
-
+		c.adjustReceiveWindow()
+		c.ack(ctx)
 		return true
 	case <-ctx.Done():
 		c.closeCh <- errQuitByContext
@@ -190,8 +193,8 @@ func (c *Workflow) sendToTun(ctx context.Context, pkt *Packet) {
 }
 
 func (c *Workflow) newPacket(ipPlayloadLen int) *Packet {
-	pkg := NewIPPacket(ipPlayloadLen, c.id.Destination(), c.id.Source())
-	ipHdr := pkg.ipHdr
+	pkt := NewPacket(ipPlayloadLen, c.id.Destination(), c.id.Source())
+	ipHdr := pkt.IPHeader()
 	ipHdr.SetL4Protocol(unix.IPPROTO_TCP)
 	ipHdr.SetChecksum()
 
@@ -199,64 +202,61 @@ func (c *Workflow) newPacket(ipPlayloadLen int) *Packet {
 	tcpHdr.SetDataOffset(5)
 	tcpHdr.SetSourcePort(c.id.DestinationPort())
 	tcpHdr.SetDestinationPort(c.id.SourcePort())
-	tcpHdr.SetWindowSize(uint16(c.receiveWindow()))
-	return pkg
+	tcpHdr.SetWindowSize(c.receiveWindow())
+	return pkt
 }
 
 func (c *Workflow) synAck(ctx context.Context, syn *Packet) {
-	syntcpHdr := syn.Header()
-	if !syntcpHdr.SYN() {
+	synHdr := syn.Header()
+	if !synHdr.SYN() {
 		return
 	}
 	hl := HeaderLen
-	if syntcpHdr.ECE() {
+	if synHdr.ECE() {
 		hl += 4
 	}
-	pkg := c.newPacket(hl)
-	tcpHdr := pkg.Header()
+	pkt := c.newPacket(hl)
+	tcpHdr := pkt.Header()
 	tcpHdr.SetSYN(true)
 	tcpHdr.SetACK(true)
 	tcpHdr.SetSequence(c.nextSequence())
-	tcpHdr.SetAckNumber(syntcpHdr.Sequence() + 1)
-	if syntcpHdr.ECE() {
+	tcpHdr.SetAckNumber(synHdr.Sequence() + 1)
+	if synHdr.ECE() {
 		tcpHdr.SetDataOffset(6)
 		opts := tcpHdr.OptionBytes()
 		opts[0] = 2
 		opts[1] = 4
-		binary.BigEndian.PutUint16(opts[2:], buffer.MTU-uint16(pkg.ipHdr.HeaderLen()+HeaderLen))
+		binary.BigEndian.PutUint16(opts[2:], uint16(buffer.DataPool.MTU-HeaderLen))
 	}
-	tcpHdr.SetChecksum(pkg.ipHdr)
-	c.sendToTun(ctx, pkg)
-
-	// SYN counts 1 seq
+	tcpHdr.SetChecksum(pkt.IPHeader())
+	c.sendToTun(ctx, pkt)
 	c.addNextSequence(1)
 }
 
 func (c *Workflow) finAck(ctx context.Context) {
-	pkg := c.newPacket(HeaderLen)
-	tcpHdr := pkg.Header()
+	pkt := c.newPacket(HeaderLen)
+	tcpHdr := pkt.Header()
 	tcpHdr.SetFIN(true)
 	tcpHdr.SetACK(true)
 	tcpHdr.SetSequence(c.nextSequence())
 	tcpHdr.SetAckNumber(c.receiveNextSequence())
-	tcpHdr.SetChecksum(pkg.ipHdr)
-	c.sendToTun(ctx, pkg)
-	// FIN counts 1 seq
+	tcpHdr.SetChecksum(pkt.IPHeader())
+	c.sendToTun(ctx, pkt)
 	c.addNextSequence(1)
 }
 
 func (c *Workflow) ack(ctx context.Context) {
 	ackNum := c.receiveNextSequence()
-	if c.receiveNextSequence() == c.lastAck() {
-		return
-	}
-	pkg := c.newPacket(HeaderLen)
-	tcpHdr := pkg.Header()
+	//	if c.receiveNextSequence() == c.lastAck() {
+	//		return
+	//	}
+	pkt := c.newPacket(HeaderLen)
+	tcpHdr := pkt.Header()
 	tcpHdr.SetACK(true)
 	tcpHdr.SetSequence(c.nextSequence())
 	tcpHdr.SetAckNumber(ackNum)
-	tcpHdr.SetChecksum(pkg.ipHdr)
-	c.sendToTun(ctx, pkg)
+	tcpHdr.SetChecksum(pkt.IPHeader())
+	c.sendToTun(ctx, pkt)
 }
 
 func (c *Workflow) socksWriterLoop(ctx context.Context) {
@@ -266,6 +266,7 @@ func (c *Workflow) socksWriterLoop(ctx context.Context) {
 			c.closeCh <- errQuitByContext
 			return
 		case pkt := <-c.toSocks:
+			c.adjustReceiveWindow()
 			tcpHdr := pkt.Header()
 			dlog.Debugf(ctx, "socksConn Write: %s", pkt)
 			data := tcpHdr.Payload()
@@ -279,15 +280,7 @@ func (c *Workflow) socksWriterLoop(ctx context.Context) {
 				}
 				data = data[n:]
 			}
-
-			// increase window when processed
-			wnd := c.receiveWindow()
-			wnd += int32(len(tcpHdr.Payload()))
-			if wnd > int32(maxReceiveWindow) {
-				wnd = int32(maxReceiveWindow)
-			}
-			c.setReceiveWindow(wnd)
-			buffer.DataPool.PutBuffer(pkt.data)
+			pkt.Release()
 		}
 	}
 }
@@ -302,36 +295,37 @@ func (c *Workflow) socksReaderLoop(ctx context.Context) {
 
 	for {
 		window := c.sendWindow()
-		if window <= 0 {
-			for window <= 0 {
-				c.windowCond.L.Lock()
-				c.windowCond.Wait()
+		if window == 0 {
+			// The intended receiver is currently not accepting data. We must
+			// wait for the window to increase.
+			dlog.Debugf(ctx, "%s TCP window is zero", c.id)
+			for window == 0 {
+				dtime.SleepWithContext(ctx, 10*time.Microsecond)
 				window = c.sendWindow()
 			}
-			c.windowCond.L.Unlock()
 		}
 
 		maxRead := int(window)
-		if maxRead > buffer.MTU-bothHeadersLen {
-			maxRead = buffer.MTU - bothHeadersLen
+		if maxRead > buffer.DataPool.MTU-bothHeadersLen {
+			maxRead = buffer.DataPool.MTU - bothHeadersLen
 		}
 
 		pkt := c.newPacket(HeaderLen + maxRead)
-		ipHdr := pkt.ipHdr
+		ipHdr := pkt.IPHeader()
 		tcpHdr := pkt.Header()
 		n, err := c.socksConn.Read(tcpHdr.Payload())
 		if err != nil {
+			pkt.Release()
 			if ctx.Err() == nil && c.state() < stateFinWait1 {
 				c.closeCh <- err
 			}
 			return
 		}
-
-		if n < maxRead {
-			ipHdr.SetPayloadLen(n + HeaderLen)
-			ipHdr.SetChecksum()
-			pkt.data.SetLength(n + bothHeadersLen)
+		if n == 0 {
+			continue
 		}
+		ipHdr.SetPayloadLen(n + HeaderLen)
+		ipHdr.SetChecksum()
 
 		tcpHdr.SetACK(true)
 		tcpHdr.SetPSH(true)
@@ -340,20 +334,17 @@ func (c *Workflow) socksReaderLoop(ctx context.Context) {
 		tcpHdr.SetChecksum(ipHdr)
 
 		c.sendToTun(ctx, pkt)
-		// adjust seq
-		c.addNextSequence(uint32(len(tcpHdr.Payload())))
+		c.addNextSequence(uint32(n))
 
-		nxt := window - int32(n)
-		if nxt < 0 {
-			nxt = 0
-		}
-		// if sendWindow does not equal to wnd, it is already updated by a
-		// received pkt from TUN
-		atomic.CompareAndSwapInt32(&c.sendWnd, window, nxt)
+		// Decrease the window size with the bytes that we just sent unless it's already updated
+		// from a received package
+		window -= window - uint16(n)
+		atomic.CompareAndSwapInt32(&c.sendWnd, int32(window), int32(window))
 	}
 }
 
 var errQuitByOther = errors.New("quitByOther")
+var errQuitByUs = errors.New("quitByUs")
 var errTimedWait = errors.New("quitBySelf")
 var errQuitByReset = errors.New("quitByReset")
 var errQuitByContext = errors.New("quitByContext")
@@ -371,21 +362,12 @@ func (c *Workflow) dialSocks(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-// stateClosed receives a SYN packet, tries to connect the socks proxy, gives a
-// SYN/ACK if success, otherwise RST
-func (c *Workflow) closed(ctx context.Context, syn *Packet) error {
-	// dlog.Debugf(ctx, "stateClosed %s.%d", c.id.Destination(), c.id.DestinationPort())
-	for i := 0; i < 2; i++ {
-		conn, err := c.dialSocks(ctx)
-		if err != nil {
-			dlog.Error(ctx, err)
-			continue
-		}
-		c.socksConn = conn
-		break
-	}
-
-	if c.socksConn == nil {
+func (c *Workflow) idle(ctx context.Context, syn *Packet) error {
+	defer syn.Release()
+	dlog.Debugf(ctx, "stateIdle %s", c.id)
+	conn, err := c.dialSocks(ctx)
+	if err != nil {
+		dlog.Errorf(ctx, "Unable to connect to socks server: %v", err)
 		select {
 		case <-ctx.Done():
 			return errQuitByContext
@@ -393,81 +375,104 @@ func (c *Workflow) closed(ctx context.Context, syn *Packet) error {
 		}
 		return errQuitByReset
 	}
-	// context variables
+	c.socksConn = conn
+
 	c.setReceiveNextSequence(syn.Header().Sequence() + 1)
 	c.setNextSequence(1)
-
 	c.synAck(ctx, syn)
 	c.setState(stateSynReceived)
 	return nil
 }
 
-func (c *Workflow) synReceived(ctx context.Context, pkt *Packet) (bool, error) {
-	// dlog.Debugf(ctx, "stateSynReceived %s", c.id)
+func (c *Workflow) validAck(tcpHdr Header) bool {
+	return tcpHdr.AckNumber() == c.nextSequence()
+}
+
+func (c *Workflow) validSequence(tcpHdr Header) bool {
+	return tcpHdr.Sequence() == c.receiveNextSequence()
+}
+
+func (c *Workflow) synReceived(ctx context.Context, pkt *Packet) (err error) {
+	dlog.Debugf(ctx, "stateSynReceived %s", c.id)
+	release := true
+	defer func() {
+		if release {
+			pkt.Release()
+		}
+	}()
+
 	tcpHdr := pkt.Header()
-	if !(c.validSeq(tcpHdr) && c.validAck(tcpHdr)) {
+	if !(c.validSequence(tcpHdr) && c.validAck(tcpHdr)) {
 		if !tcpHdr.RST() {
 			select {
 			case <-ctx.Done():
-				return true, errQuitByContext
+				err = errQuitByContext
 			case c.toTun <- pkt.Reset():
 			}
 		}
-		return true, nil
+		return err
 	}
 	if tcpHdr.RST() {
-		return true, errQuitByReset
+		return errQuitByReset
 	}
 	if !tcpHdr.ACK() {
-		return true, nil
+		return nil
 	}
 
-	putBack := true
 	c.setState(stateEstablished)
 	go c.socksWriterLoop(ctx)
 	go c.socksReaderLoop(ctx)
 
-	if len(tcpHdr.Payload()) != 0 {
-		if c.sendToSocks(ctx, pkt) {
-			putBack = false
-		}
+	if len(tcpHdr.Payload()) != 0 && c.sendToSocks(ctx, pkt) {
+		release = false
 	}
-	return putBack, nil
+	return nil
 }
 
-func (c *Workflow) established(ctx context.Context, pkt *Packet) (bool, error) {
-	// dlog.Debugf(ctx, "stateEstablished %s", c.id)
+func (c *Workflow) established(ctx context.Context, pkt *Packet) error {
+	dlog.Debugf(ctx, "stateEstablished %s", c.id)
+	release := true
+	defer func() {
+		if release {
+			pkt.Release()
+		}
+	}()
+
 	tcpHdr := pkt.Header()
-	if !c.validSeq(tcpHdr) {
+	if !c.validSequence(tcpHdr) {
 		c.ack(ctx)
-		return true, nil
+		return nil
 	}
 	if tcpHdr.RST() {
-		return true, errQuitByReset
+		return errQuitByReset
 	}
 	if !tcpHdr.ACK() {
-		return true, nil
+		return nil
 	}
 
-	putBack := true
-	if len(tcpHdr.Payload()) != 0 {
-		if c.sendToSocks(ctx, pkt) {
-			putBack = false
-		}
+	if len(tcpHdr.Payload()) != 0 && c.sendToSocks(ctx, pkt) {
+		release = false
 	}
 	if tcpHdr.FIN() {
 		c.addReceiveNextSequence(1)
 		c.finAck(ctx)
 		c.setState(stateLastACK)
-		return putBack, errQuitByOther
+		return errQuitByOther
 	}
-	return putBack, nil
+	return nil
 }
 
 func (c *Workflow) finWait1(ctx context.Context, pkt *Packet) error {
-	// dlog.Debugf(ctx, "stateFinWait1 %s", c.id)
+	dlog.Debugf(ctx, "stateFinWait1 %s", c.id)
+	release := true
+	defer func() {
+		if release {
+			pkt.Release()
+		}
+	}()
 	tcpHdr := pkt.Header()
-	if !c.validSeq(tcpHdr) {
+	if !c.validSequence(tcpHdr) {
+		dlog.Debugf(ctx, "invalid sequence %s. %d != %d", c.id, tcpHdr.Sequence(), c.receiveNextSequence())
 		return nil
 	}
 	if tcpHdr.RST() {
@@ -486,16 +491,27 @@ func (c *Workflow) finWait1(ctx context.Context, pkt *Packet) error {
 			c.setState(stateClosing)
 			return nil
 		}
-	} else {
-		c.setState(stateFinWait2)
-		return nil
 	}
+
+	if !c.validAck(tcpHdr) {
+		// Not ACK of our FIN
+		if len(tcpHdr.Payload()) != 0 {
+			if c.sendToSocks(ctx, pkt) {
+				release = false
+			}
+		}
+	} else {
+		dlog.Debugf(ctx, "stateFinWait1 %s no FIN, entering FIN_WAIT_2", c.id)
+		c.setState(stateFinWait2)
+	}
+	return nil
 }
 
 func (c *Workflow) finWait2(ctx context.Context, pkt *Packet) error {
-	// dlog.Debugf(ctx, "stateFinWait2 %s", c.id)
+	dlog.Debugf(ctx, "stateFinWait2 %s", c.id)
+	defer pkt.Release()
 	tcpHdr := pkt.Header()
-	if !(c.validSeq(tcpHdr) && c.validAck(tcpHdr)) {
+	if !(c.validSequence(tcpHdr) && c.validAck(tcpHdr)) {
 		return nil
 	}
 	if tcpHdr.RST() {
@@ -506,14 +522,15 @@ func (c *Workflow) finWait2(ctx context.Context, pkt *Packet) error {
 	}
 	c.addReceiveNextSequence(1)
 	c.ack(ctx)
-	c.setState(stateClosed)
+	c.setState(stateIdle)
 	return errTimedWait
 }
 
-func (c *Workflow) closing(_ context.Context, pkt *Packet) error {
-	// dlog.Debugf(ctx, "stateClosing %s", c.id)
+func (c *Workflow) closing(ctx context.Context, pkt *Packet) error {
+	dlog.Debugf(ctx, "stateClosing %s", c.id)
+	defer pkt.Release()
 	tcpHdr := pkt.Header()
-	if !(c.validSeq(tcpHdr) && c.validAck(tcpHdr)) {
+	if !(c.validSequence(tcpHdr) && c.validAck(tcpHdr)) {
 		return nil
 	}
 	if tcpHdr.RST() {
@@ -525,10 +542,11 @@ func (c *Workflow) closing(_ context.Context, pkt *Packet) error {
 	return errTimedWait
 }
 
-func (c *Workflow) atLastAck(_ context.Context, pkt *Packet) error {
-	// dlog.Debugf(ctx, "stateLastAck %s", c.id)
+func (c *Workflow) atLastAck(ctx context.Context, pkt *Packet) error {
+	dlog.Debugf(ctx, "stateLastAck %s", c.id)
+	defer pkt.Release()
 	tcpHdr := pkt.Header()
-	if !(c.validSeq(tcpHdr) && c.validAck(tcpHdr)) {
+	if !(c.validSequence(tcpHdr) && c.validAck(tcpHdr)) {
 		return nil
 	}
 	if !tcpHdr.ACK() {
@@ -537,34 +555,26 @@ func (c *Workflow) atLastAck(_ context.Context, pkt *Packet) error {
 	return errTimedWait
 }
 
-func (c *Workflow) updateSendWindow(pkt *Packet) {
-	c.setSendWindow(int32(pkt.Header().WindowSize()))
-	c.windowCond.Signal()
-}
-
-func (c *Workflow) Run(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-	go c.processAcks(ctx)
-	for c.processFromTun(ctx) {
+func (c *Workflow) processPackets(ctx context.Context) {
+	for c.processNextPacket(ctx) {
 	}
 }
 
-func (c *Workflow) processFromTun(ctx context.Context) bool {
+func (c *Workflow) processNextPacket(ctx context.Context) bool {
 	select {
 	case pkt := <-c.fromTun:
-		c.updateSendWindow(pkt)
+		c.setSendWindow(pkt.Header().WindowSize())
 
-		dlog.Debugf(ctx, "read from TUN %s", pkt)
+		dlog.Debugf(ctx, "<- TUN %s", pkt)
 
 		var end error
-		pubBack := true
 		switch c.state() {
-		case stateClosed:
-			end = c.closed(ctx, pkt)
+		case stateIdle:
+			end = c.idle(ctx, pkt)
 		case stateSynReceived:
-			pubBack, end = c.synReceived(ctx, pkt)
+			end = c.synReceived(ctx, pkt)
 		case stateEstablished:
-			pubBack, end = c.established(ctx, pkt)
+			end = c.established(ctx, pkt)
 		case stateFinWait1:
 			end = c.finWait1(ctx, pkt)
 		case stateFinWait2:
@@ -574,9 +584,6 @@ func (c *Workflow) processFromTun(ctx context.Context) bool {
 		case stateLastACK:
 			end = c.atLastAck(ctx, pkt)
 		}
-		if pubBack {
-			buffer.DataPool.PutBuffer(pkt.data)
-		}
 		if end != nil {
 			c.closeCh <- end
 			return true
@@ -584,39 +591,25 @@ func (c *Workflow) processFromTun(ctx context.Context) bool {
 
 	case err := <-c.closeCh:
 		switch err {
+		case errQuitByUs:
+			switch c.state() {
+			case stateEstablished:
+				c.finAck(ctx)
+				c.setState(stateFinWait1)
+				return true
+			}
+			return false
 		case errQuitByOther:
-			c.finAck(ctx)
-			c.setState(stateFinWait1)
 			return true
 		case errTimedWait:
-			c.setState(stateClosed)
+			c.setState(stateIdle)
 			ctx, cancel := context.WithTimeout(ctx, time.Second)
 			defer cancel()
-			return c.processFromTun(ctx)
-		}
-		c.remove()
-		if c.socksConn != nil {
-			c.socksConn.Close()
+			return c.processNextPacket(ctx)
 		}
 		return false
-
 	case <-ctx.Done():
-		c.remove()
-		if c.socksConn != nil {
-			c.socksConn.Close()
-		}
 		return false
 	}
 	return true
-}
-
-func (c *Workflow) processAcks(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.ackCh:
-			c.ack(ctx)
-		}
-	}
 }

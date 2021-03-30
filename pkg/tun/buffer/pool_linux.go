@@ -4,37 +4,36 @@ import (
 	"sync"
 )
 
-type Buffer struct {
+type Data struct {
 	buf []byte
 }
 
-func (b *Buffer) Buf() []byte {
+func (b *Data) Buf() []byte {
 	return b.buf
 }
 
-func (b *Buffer) Slice(start, end int) *Buffer {
-	return &Buffer{buf: b.buf[start:end]}
-}
-
-func (b *Buffer) Raw() []byte {
-	return b.buf
-}
-
-func (b *Buffer) SetLength(l int) {
+func (b *Data) SetLength(l int) {
 	if l > cap(b.buf) {
+		buf := b.buf
 		b.buf = make([]byte, l)
+		copy(b.buf, buf)
 	} else {
 		b.buf = b.buf[:l]
 	}
 }
 
-func (b *Buffer) Copy() *Buffer {
-	raw := make([]byte, len(b.raw))
-	copy(raw, b.raw)
-	return &Buffer{raw: raw}
+func (b *Data) Slice(start, end int) *Data {
+	return &Data{buf: b.buf[start:end]}
 }
 
-var BufferPool = &buf.OffsetBufPool{Pool: sync.Pool{
-	New: func() interface{} {
-		return &Buffer{buf: make([]byte, Size)}
-	}}}
+func (b *Data) Raw() []byte {
+	return b.buf
+}
+
+var DataPool = &Pool{
+	pool: sync.Pool{
+		New: func() interface{} {
+			return &Data{buf: make([]byte, defaultMTU+maxIPHeader)}
+		}},
+	MTU: defaultMTU,
+}

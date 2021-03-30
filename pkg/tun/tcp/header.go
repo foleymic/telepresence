@@ -13,7 +13,7 @@ import (
 const HeaderLen = 20
 const HeaderMaxLen = 60
 
-// The TCP header and its payload
+// Header represents a TCP header. The header is obtained by simply casting the IP headers payload.
 type Header []byte
 
 func (h Header) SourcePort() uint16 {
@@ -196,6 +196,7 @@ func (h Header) SetChecksum(ipHdr ip.Header) {
 	ip.L4Checksum(ipHdr, 16, unix.IPPROTO_TCP)
 }
 
+// AppendFlags appends a comma separated list of all flags that are currently set.
 func (h Header) AppendFlags(b *bytes.Buffer) {
 	l := b.Len()
 	if h.SYN() {
@@ -223,6 +224,6 @@ func (h Header) AppendFlags(b *bytes.Buffer) {
 		b.WriteString("CWR,")
 	}
 	if b.Len() > l {
-		b.Truncate(b.Len() - 1)
+		b.Truncate(b.Len() - 1) // remove last comma
 	}
 }

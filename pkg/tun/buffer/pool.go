@@ -2,23 +2,22 @@ package buffer
 
 import (
 	"sync"
-
-	"golang.org/x/net/ipv6"
 )
 
-const MTU = 1500
-const Size = ipv6.HeaderLen + 60 + MTU
+const defaultMTU = 1500
+const maxIPHeader = 60
 
 type Pool struct {
-	sync.Pool
+	pool sync.Pool
+	MTU  int
 }
 
-func (p *Pool) GetData(size int) *Data {
-	b := p.Get().(*Data)
+func (p *Pool) Get(size int) *Data {
+	b := p.pool.Get().(*Data)
 	b.SetLength(size)
 	return b
 }
 
-func (p *Pool) PutBuffer(b *Data) {
-	p.Put(b)
+func (p *Pool) Put(b *Data) {
+	p.pool.Put(b)
 }

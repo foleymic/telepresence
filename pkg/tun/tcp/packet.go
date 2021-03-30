@@ -4,86 +4,51 @@ import (
 	"bytes"
 	"fmt"
 	"net"
-	"sync/atomic"
-
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
-	"golang.org/x/sys/unix"
 
 	"github.com/telepresenceio/telepresence/v2/pkg/tun/buffer"
+
+	"golang.org/x/sys/unix"
+
 	"github.com/telepresenceio/telepresence/v2/pkg/tun/ip"
 )
 
 type Packet struct {
-	ipHdr ip.Header
-	data  *buffer.Data
-}
-
-var ipID uint32
-
-func NextID() int {
-	return int(atomic.AddUint32(&ipID, 1) & 0x0000ffff)
+	ip.Packet
 }
 
 func MakePacket(ipHdr ip.Header, data *buffer.Data) *Packet {
-	return &Packet{ipHdr: ipHdr, data: data}
+	return &Packet{Packet: ip.MakePacket(ipHdr, data)}
 }
 
-func NewIPPacket(ipPayloadLen int, src, dst net.IP) *Packet {
-	pkg := Packet{}
-	if len(src) == 4 && len(dst) == 4 {
-		pkg.data = buffer.DataPool.GetData(ipPayloadLen + ipv4.HeaderLen)
-		iph := ip.V4Header(pkg.data.Buf())
-		iph.Initialize()
-		iph.SetID(NextID())
-		pkg.ipHdr = iph
-	} else {
-		pkg.data = buffer.DataPool.GetData(ipPayloadLen + ipv6.HeaderLen)
-		iph := ip.V6Header(pkg.data.Buf())
-		iph.Initialize()
-		pkg.ipHdr = iph
-	}
-	iph := pkg.ipHdr
-	iph.SetSource(src)
-	iph.SetDestination(dst)
-	iph.SetTTL(64)
-	iph.SetPayloadLen(ipPayloadLen)
-	return &pkg
-}
-
-func (p *Packet) IPHeader() ip.Header {
-	return p.ipHdr
+func NewPacket(ipPayloadLen int, src, dst net.IP) *Packet {
+	return &Packet{Packet: ip.NewPacket(ipPayloadLen, src, dst)}
 }
 
 func (p *Packet) Header() Header {
-	return p.ipHdr.Payload()
+	return p.IPHeader().Payload()
 }
 
-func (p *Packet) Data() *buffer.Data {
-	return p.data
+func (p *Packet) PayloadLen() int {
+	return p.IPHeader().PayloadLen() - p.Header().DataOffset()*4
 }
 
 func (p *Packet) String() string {
 	b := bytes.Buffer{}
-	ipHdr := p.ipHdr
+	ipHdr := p.IPHeader()
 	tcpHdr := p.Header()
 	fmt.Fprintf(&b, "tcp sq %.3d, an %.3d, %s.%d -> %s.%d, flags=",
 		tcpHdr.Sequence(), tcpHdr.AckNumber(), ipHdr.Source(), tcpHdr.SourcePort(), ipHdr.Destination(), tcpHdr.DestinationPort())
 	tcpHdr.AppendFlags(&b)
-	pl := tcpHdr.Payload()
-	if len(pl) > 0 {
-		b.WriteString(", payload: ")
-		b.Write(pl)
-	}
 	return b.String()
 }
 
+// Reset creates an ACK+RST packet for this packet.
 func (p *Packet) Reset() *Packet {
-	incIp := p.ipHdr
+	incIp := p.IPHeader()
 	incTcp := p.Header()
 
-	pkt := NewIPPacket(HeaderLen, incIp.Source(), incIp.Destination())
-	iph := pkt.ipHdr
+	pkt := Packet{Packet: ip.NewPacket(HeaderLen, incIp.Source(), incIp.Destination())}
+	iph := pkt.IPHeader()
 	iph.SetL4Protocol(unix.IPPROTO_TCP)
 	iph.SetChecksum()
 
@@ -95,12 +60,6 @@ func (p *Packet) Reset() *Packet {
 	tcpHdr.SetRST(true)
 	tcpHdr.SetACK(true)
 
-	// RFC 793:
-	// "If the incoming segment has an ACK field, the reset takes its sequence
-	// number from the ACK field of the segment, otherwise the reset has
-	// sequence number zero and the ACK field is set to the sum of the sequence
-	// number and segment length of the incoming segment. The connection remains
-	// in the CLOSED state."
 	if incTcp.ACK() {
 		tcpHdr.SetSequence(incTcp.AckNumber())
 		tcpHdr.SetAckNumber(incTcp.Sequence() + 1)
@@ -110,5 +69,5 @@ func (p *Packet) Reset() *Packet {
 	}
 
 	tcpHdr.SetChecksum(iph)
-	return pkt
+	return &pkt
 }

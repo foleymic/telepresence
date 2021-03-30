@@ -4,7 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/telepresenceio/telepresence/v2/pkg/tun/udp"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -18,23 +23,31 @@ import (
 	"github.com/telepresenceio/telepresence/v2/pkg/tun/tcp"
 )
 
-type Dispatcher struct {
-	dev         *Device
-	socksDialer proxy.Dialer
-	udpHandlers map[ip.ConnID]*udpHandler
-	tcpHandlers map[ip.ConnID]*tcp.Workflow
-	handlersWg  sync.WaitGroup
-	toTunCh     chan interface{}
-	lock        sync.Mutex
+type PacketWithAckFunc struct {
+	Packet  interface{}
+	AckFunc func(context.Context)
 }
 
-func NewDispatcher(dev *Device, socksDialer proxy.Dialer) *Dispatcher {
+type Dispatcher struct {
+	dev            *Device
+	socksTCPDialer proxy.Dialer
+	socksUDPDialer proxy.Dialer
+	udpHandlers    map[ip.ConnID]*udp.Handler
+	tcpHandlers    map[ip.ConnID]*tcp.Workflow
+	handlersWg     sync.WaitGroup
+	toTunCh        chan *PacketWithAckFunc
+	closed         int32
+	lock           sync.Mutex
+}
+
+func NewDispatcher(dev *Device, socksTCPDialer, socksUDPDialer proxy.Dialer) *Dispatcher {
 	return &Dispatcher{
-		dev:         dev,
-		socksDialer: socksDialer,
-		udpHandlers: make(map[ip.ConnID]*udpHandler),
-		tcpHandlers: make(map[ip.ConnID]*tcp.Workflow),
-		toTunCh:     make(chan interface{}),
+		dev:            dev,
+		socksTCPDialer: socksTCPDialer,
+		socksUDPDialer: socksUDPDialer,
+		udpHandlers:    make(map[ip.ConnID]*udp.Handler),
+		tcpHandlers:    make(map[ip.ConnID]*tcp.Workflow),
+		toTunCh:        make(chan *PacketWithAckFunc, 100}),
 	}
 }
 
@@ -44,8 +57,8 @@ func (d *Dispatcher) deleteHandler(id ip.ConnID) {
 	d.lock.Unlock()
 }
 
-func NewSocksDialer(port int) (proxy.Dialer, error) {
-	return proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", port), nil, proxy.Direct)
+func NewSocksDialer(proto string, port int) (proxy.Dialer, error) {
+	return proxy.SOCKS5(proto, fmt.Sprintf("127.0.0.1:%d", port), nil, proxy.Direct)
 }
 
 func (d *Dispatcher) Stop(c context.Context) {
@@ -53,6 +66,7 @@ func (d *Dispatcher) Stop(c context.Context) {
 		handler.Close(c)
 	}
 	d.handlersWg.Wait()
+	atomic.StoreInt32(&d.closed, 1)
 	d.dev.Close()
 }
 
@@ -63,31 +77,29 @@ func (d *Dispatcher) Run(c context.Context) error {
 		for {
 			select {
 			case <-c.Done():
-				dlog.Info(c, "quit")
 				return nil
-			case pkt := <-d.toTunCh:
+			case pwa := <-d.toTunCh:
+				if atomic.LoadInt32(&d.closed) != 0 {
+					continue
+				}
+				pkt := pwa.Packet
 				switch pkt := pkt.(type) {
 				case *tcp.Packet:
-					dlog.Debugf(c, "write to TUN: %s", pkt)
+					dlog.Debugf(c, "-> TUN: %s", pkt)
 					_, err := d.dev.Write(pkt.Data())
-					buffer.DataPool.PutBuffer(pkt.Data())
+					if err == nil {
+						pwa.AckFunc(c)
+					}
+					pkt.Release()
 					if err != nil {
+						if atomic.LoadInt32(&d.closed) != 0 {
+							continue
+						}
 						if c.Err() != nil {
 							err = nil
 						}
 						return err
 					}
-
-					/*
-						case *udpPacket:
-							udp := pkt.(*udpPacket)
-							d.dev.Write(udp.wire)
-							releaseUDPPacket(udp)
-						case *ipPacket:
-							ip := pkt.(*ipPacket)
-							d.dev.Write(ip.wire)
-							releaseIPPacket(ip)
-					*/
 				}
 			}
 		}
@@ -95,10 +107,13 @@ func (d *Dispatcher) Run(c context.Context) error {
 
 	g.Go("reader", func(c context.Context) error {
 		fragmentMap := make(map[uint16][]*buffer.Data)
-		for {
-			data := buffer.DataPool.GetData(buffer.Size)
+		for atomic.LoadInt32(&d.closed) == 0 {
+			data := buffer.DataPool.Get(buffer.DataPool.MTU)
 			n, err := d.dev.Read(data)
 			if err != nil {
+				if c.Err() != nil || atomic.LoadInt32(&d.closed) != 0 {
+					return nil
+				}
 				return fmt.Errorf("read packet error: %v", err)
 			}
 			if n == 0 {
@@ -108,19 +123,19 @@ func (d *Dispatcher) Run(c context.Context) error {
 			hdr, err := ip.ParseHeader(data.Buf())
 			if err != nil {
 				dlog.Error(c, "Unable to parse package header")
-				buffer.DataPool.PutBuffer(data)
+				buffer.DataPool.Put(data)
 				continue
 			}
 
 			if hdr.Version() == ipv6.Version {
 				dlog.Error(c, "IPv6 is not yet handled by this dispatcher")
-				buffer.DataPool.PutBuffer(data)
+				buffer.DataPool.Put(data)
 				continue
 			}
 
 			ipHdr := hdr.(ip.V4Header)
 			if ipHdr.Flags()&ipv4.MoreFragments != 0 || ipHdr.FragmentOffset() != 0 {
-				data = ipHdr.ProcessFragment(data, fragmentMap)
+				data = ipHdr.ConcatFragments(data, fragmentMap)
 				if data == nil {
 					continue
 				}
@@ -132,58 +147,67 @@ func (d *Dispatcher) Run(c context.Context) error {
 				// data is handed over to dispatcher.
 				d.tcp(c, tcp.MakePacket(ipHdr, data))
 			case unix.IPPROTO_UDP:
-				dlog.Debugf(c, "discarding UDP package to %s:%d", ipHdr.Destination(), udpDatagram(ipHdr.Payload()).destination())
-				buffer.DataPool.PutBuffer(data)
+				dlog.Debugf(c, "discarding UDP package to %s:%d", ipHdr.Destination(), udp.Header(ipHdr.Payload()).DestinationPort())
+				buffer.DataPool.Put(data)
 			default:
-				buffer.DataPool.PutBuffer(data)
+				buffer.DataPool.Put(data)
 			}
 		}
+		return nil
 	})
 	return g.Wait()
 }
 
-func (d *Dispatcher) createTCPConnTrack(c context.Context, id ip.ConnID) *tcp.Workflow {
-	track := tcp.NewWorkflow(d.socksDialer.(proxy.ContextDialer), d.toTunCh, id, func() {
-		d.clearTCPConnTrack(c, id)
-	})
+func (d *Dispatcher) connIDs() []string {
 	d.lock.Lock()
-	d.tcpHandlers[id] = track
-	count := len(d.tcpHandlers)
+	ids := make([]string, len(d.tcpHandlers))
+	i := 0
+	for id := range d.tcpHandlers {
+		ids[i] = id.String()
+		i++
+	}
 	d.lock.Unlock()
-	d.handlersWg.Add(1)
-	go track.Run(c, &d.handlersWg)
-	dlog.Debugf(c, "tracking %d TCP connections", count)
-	return track
+	sort.Strings(ids)
+	return ids
 }
 
-func (d *Dispatcher) getTCPConnTrack(id ip.ConnID) *tcp.Workflow {
+func (d *Dispatcher) createTCPWorkflow(c context.Context, id ip.ConnID) *tcp.Workflow {
+	wf := tcp.NewWorkflow(d.socksTCPDialer.(proxy.ContextDialer), d.toTunCh, id, func() {
+		d.clearTCPWorkflow(c, id)
+	})
+	d.lock.Lock()
+	d.tcpHandlers[id] = wf
+	d.lock.Unlock()
+	d.handlersWg.Add(1)
+	go wf.Run(c, &d.handlersWg)
+	dlog.Debugf(c, "tracking TCP connections %s", strings.Join(d.connIDs(), ", "))
+	return wf
+}
+
+func (d *Dispatcher) getTCPWorkflow(id ip.ConnID) *tcp.Workflow {
 	d.lock.Lock()
 	handler := d.tcpHandlers[id]
 	d.lock.Unlock()
 	return handler
 }
 
-func (d *Dispatcher) clearTCPConnTrack(c context.Context, id ip.ConnID) {
+func (d *Dispatcher) clearTCPWorkflow(c context.Context, id ip.ConnID) {
 	d.lock.Lock()
 	delete(d.tcpHandlers, id)
-	count := len(d.tcpHandlers)
 	d.lock.Unlock()
-	dlog.Debugf(c, "tracking %d TCP connections", count)
+	dlog.Debugf(c, "tracking TCP connections %s", strings.Join(d.connIDs(), ", "))
 }
 
 func (d *Dispatcher) tcp(c context.Context, pkt *tcp.Packet) {
 	ipHdr := pkt.IPHeader()
 	tcpHdr := pkt.Header()
 	connID := ip.NewConnID(ipHdr, tcpHdr.SourcePort(), tcpHdr.DestinationPort())
-	track := d.getTCPConnTrack(connID)
-	if track == nil {
-		// ignore RST, if there is no track of this connection
+	wf := d.getTCPWorkflow(connID)
+	if wf == nil {
 		if tcpHdr.RST() {
-			dlog.Debug(c, "dispatching got RST without but connection is not yet tracked")
+			dlog.Debug(c, "dispatching got RST without connection workflow")
 			return
 		}
-
-		// return a RST to non-SYN packet
 		if !tcpHdr.SYN() {
 			select {
 			case <-c.Done():
@@ -191,9 +215,9 @@ func (d *Dispatcher) tcp(c context.Context, pkt *tcp.Packet) {
 			case d.toTunCh <- pkt.Reset():
 			}
 		}
-		track = d.createTCPConnTrack(c, connID)
+		wf = d.createTCPWorkflow(c, connID)
 	}
-	track.NewPacket(c, pkt)
+	wf.NewPacket(c, pkt)
 }
 
 func (d *Dispatcher) AddSubnets(c context.Context, subnets []*net.IPNet) error {

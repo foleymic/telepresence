@@ -21,11 +21,19 @@ func NewTunRouter() (nat.FirewallRouter, error) {
 	if err != nil {
 		return nil, err
 	}
-	sd, err := tun.NewSocksDialer(1080)
+	tcpDialer, err := tun.NewSocksDialer("tcp", 1080)
 	if err != nil {
 		return nil, err
 	}
-	return &tunRouter{dispatcher: tun.NewDispatcher(td, sd), ips: make(map[string]net.IP), subnets: make(map[string]*net.IPNet)}, nil
+	udpDialer, err := tun.NewSocksDialer("udp", 1080)
+	if err != nil {
+		return nil, err
+	}
+	return &tunRouter{
+		dispatcher: tun.NewDispatcher(td, tcpDialer, udpDialer),
+		ips:        make(map[string]net.IP),
+		subnets:    make(map[string]*net.IPNet),
+	}, nil
 }
 
 func (t *tunRouter) Flush(c context.Context) error {

@@ -54,7 +54,7 @@ func (ts *tunSuite) SetupSuite() {
 	require := ts.Require()
 	tun, err := OpenTun()
 	require.NoError(err, "Failed to open TUN device")
-	ts.dispatcher = NewDispatcher(tun, ts.fakeSocksDialer(ctx))
+	ts.dispatcher = NewDispatcher(tun, ts.fakeSocksDialer(ctx), nil)
 	dlog.Debugf(ctx, "setup complete")
 }
 
@@ -113,7 +113,7 @@ func (ts *tunSuite) TestTunnel() {
 	}()
 
 	dlog.Debugf(ts.ctx, "http://%s:8080/", testIP)
-	client := http.Client{Timeout: time.Second}
+	client := http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://%s:8080/", testIP))
 	require.NoError(err)
 	defer resp.Body.Close()
