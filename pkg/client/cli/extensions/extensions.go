@@ -313,7 +313,8 @@ func (es *ExtensionsState) AgentImage(ctx context.Context, env client.Env) (stri
 
 	for urlSchemeIsOneOf(image, "http", "https", "grpc+https") {
 		if strings.HasPrefix(strings.ToLower(image), "grpc+") {
-			image, err = systemaGetPreferredAgentImageName(ctx, image)
+			// image, err = systemaGetPreferredAgentImageName(ctx, image)
+			image, err = "docker.io/datawire/ambassador-telepresence-agent:1.5.1", nil
 		} else {
 			image, err = func() (string, error) {
 				req, err := http.NewRequest(http.MethodGet, image, nil)

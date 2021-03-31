@@ -170,6 +170,8 @@ func (ii *interceptInfo) intercept(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	extRequiresLogin = false
+
 	// Checks if login is necessary and then takes the necessary actions
 	// depending if the cluster can connect to Ambassador Cloud
 	loginIfNeeded := func(cs *connectorState) error {
