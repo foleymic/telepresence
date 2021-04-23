@@ -9,7 +9,7 @@ declare command="$1"
 shift
 
 
-readonly teleImage="tele"
+readonly teleImage="quay.io/manhrd/tele:2.2.0"
 readonly teleContainerName="tele"
 
 readonly usage="
@@ -93,11 +93,13 @@ function startTelepresence()
         # bind-propagation=rshared
         #         --volume $PWD/telepresence/:/manh/ \
         #,type=bind,consistency=delegated,bind-propagation=rshared
+        #        --device /dev/fuse \
+        #        --volume /manh/telepresenceRoot \
+        #        
     # TODO start if not already running...
     docker run -d \
         --name ${teleContainerName} \
         --cap-add SYS_ADMIN \
-        --device /dev/fuse \
         --volume $gcloudConfigPath:/root/.config/gcloud \
         --volume $PWD/telepresence/:/manh/ \
         --volume /var/run/docker.sock:/var/run/docker.sock \

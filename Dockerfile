@@ -15,10 +15,13 @@ ARG TARGETARCH
 COPY --from=build /telepresence/build-output/bin /build-output/${TARGETOS}/${TARGETARCH}/
 
 
+#############################################################################################
 # See - https://www.docker.com/blog/containerize-your-go-developer-environment-part-1/
 #    export DOCKER_BUILDKIT=1
 #    docker build --platform linux/amd64 --target bin --output bin/ .
-
+#
+#    docker build -t tele bin/build-output/
+#############################################################################################
 
 #   docker run  --rm -it --name tele  --cap-add NET_ADMIN --cap-add NET_BIND_SERVICE --network host tele bash
 
