@@ -4,7 +4,7 @@ declare service=com-manh-cp-proactive
 declare cluster=cfw200
 declare http_match=auto
 
-declare myname="launch.sh"
+declare myname=`basename $0`
 declare command="$1"
 shift
 
