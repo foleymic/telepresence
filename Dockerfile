@@ -29,6 +29,7 @@ COPY --from=build /telepresence/build-output/bin /build-output/${TARGETOS}/${TAR
 
 #   docker run --rm -it --name tele -v /Users/mfoley/.config/gcloud/:/root/.config/gcloud --privileged --network host tele bash
 
+# service=com-manh-cp-proactive
 # tag=0.67.0-c7332fc-2103121136
 # docker run -d \
 #   --name ${service} \
