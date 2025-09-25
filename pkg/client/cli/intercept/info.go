@@ -128,7 +128,16 @@ func (ii *Info) WriteTo(w io.Writer) (int64, error) {
 		kvf.Add("Wiretap name", ii.Name)
 		what = "Wiretapping"
 	default:
-		kvf.Add("Intercept name", ii.Name)
+		// For HTTP intercepts with headers, show the original name without the header suffix
+		displayName := ii.Name
+		if strings.Contains(ii.Name, "-x-intercept-id-") {
+			// Extract the original name before the header pattern
+			parts := strings.Split(ii.Name, "-x-intercept-id-")
+			if len(parts) > 0 {
+				displayName = parts[0]
+			}
+		}
+		kvf.Add("Intercept name", displayName)
 	}
 	kvf.Add("State", func() string {
 		msg := ""
@@ -204,6 +213,23 @@ func (ii *Info) WriteTo(w io.Writer) (int64, error) {
 
 	if len(ii.Metadata) > 0 {
 		kvf.Add("Metadata", fmt.Sprintf("%q", ii.Metadata))
+	}
+
+	// Show headers if present
+	if len(ii.HttpFilter) > 0 {
+		headers := make(map[string]string)
+		for _, arg := range ii.HttpFilter {
+			if strings.HasPrefix(arg, "--header=") {
+				headerPart := strings.TrimPrefix(arg, "--header=")
+				headerParts := strings.SplitN(headerPart, "=", 2)
+				if len(headerParts) == 2 {
+					headers[strings.TrimSpace(headerParts[0])] = strings.TrimSpace(headerParts[1])
+				}
+			}
+		}
+		if len(headers) > 0 {
+			kvf.Add("HTTP Headers", fmt.Sprintf("%v", headers))
+		}
 	}
 	return kvf.WriteTo(w)
 }

@@ -460,10 +460,60 @@ func (s *State) ensureAgent(parentCtx context.Context, wl k8sapi.Workload, exten
 	if err != nil {
 		return nil, nil, err
 	}
-	err = mutator.GetMap(ctx).EvictPodsWithAgentConfigMismatch(ctx, wl, sce)
-	if err != nil {
-		dlog.Errorf(ctx, "failed to inactivate pods: %v", err)
-		return nil, nil, err
+
+	// Check if pods need to be evicted for agent injection
+	mm := mutator.GetMap(ctx)
+	
+	// Check if there are any agents currently running for this workload
+	hasRunningAgents := false
+	s.EachAgent(func(id tunnel.SessionID, ag *AgentSession) bool {
+		if ag.Name == wl.GetName() && ag.Namespace == wl.GetNamespace() {
+			hasRunningAgents = true
+			return false // Stop iteration
+		}
+		return true
+	})
+	
+	if !hasRunningAgents {
+		// No agents running for this workload - need to evict pods to inject agent
+		dlog.Debugf(ctx, "No running agents found for %s, evicting pods to inject agent", wl)
+		err = mm.EvictPodsWithAgentConfigMismatch(ctx, wl, sce)
+		if err != nil {
+			dlog.Errorf(ctx, "failed to inactivate pods: %v", err)
+			return nil, nil, err
+		}
+	} else {
+		// Agents are already running - check if configuration change requires restart
+		existingConfig := mm.Get(wl.GetName(), wl.GetNamespace())
+		if existingConfig != nil {
+			existingAC := existingConfig.AgentConfig()
+			newAC := sce.AgentConfig()
+			
+			// Only evict if agent image changed or if this is a significant config change
+			// For new intercepts on existing agents, we should not restart the pod
+			needsRestart := existingAC.AgentImage != newAC.AgentImage ||
+				existingAC.AgentName != newAC.AgentName ||
+				existingAC.Namespace != newAC.Namespace
+				
+			if needsRestart {
+				dlog.Debugf(ctx, "Agent configuration changed significantly, evicting pods for %s", wl)
+				err = mm.EvictPodsWithAgentConfigMismatch(ctx, wl, sce)
+				if err != nil {
+					dlog.Errorf(ctx, "failed to inactivate pods: %v", err)
+					return nil, nil, err
+				}
+			} else {
+				dlog.Debugf(ctx, "Agent configuration change is incremental, no pod restart needed for %s", wl)
+			}
+		} else {
+			// No existing config but agents are running - this shouldn't happen, but evict to be safe
+			dlog.Debugf(ctx, "No existing config but agents running for %s, evicting pods", wl)
+			err = mm.EvictPodsWithAgentConfigMismatch(ctx, wl, sce)
+			if err != nil {
+				dlog.Errorf(ctx, "failed to inactivate pods: %v", err)
+				return nil, nil, err
+			}
+		}
 	}
 	ac = sce.AgentConfig()
 	if as, err = s.waitForAgents(ctx, ac, failedCreateCh); err != nil {
@@ -477,6 +527,7 @@ func (s *State) ensureAgent(parentCtx context.Context, wl k8sapi.Workload, exten
 }
 
 func (s *State) isExtended(spec *rpc.InterceptSpec) bool {
+	// Allow both tcp and http mechanisms as they are both supported by the standard agent
 	return spec.Mechanism != "tcp" && spec.Mechanism != "http"
 }
 

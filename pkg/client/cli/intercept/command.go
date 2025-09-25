@@ -40,6 +40,7 @@ type Command struct {
 	ServiceName   string   // --service
 	ContainerName string   // --container
 	Address       string   // --address
+	HttpHeader    string   // --http-header (format: "headerName=headerValue,headerName2=headerValue2")
 
 	Replace bool // whether --replace was passed
 	Wiretap bool // wiretap subcommand used
@@ -148,6 +149,8 @@ func (c *Command) AddInterceptFlags(cmd *cobra.Command) {
 
 	flagSet.StringVar(&c.Mechanism, "mechanism", "tcp", "Which extension `mechanism` to use")
 
+	flagSet.StringVar(&c.HttpHeader, "http-header", "", "HTTP header patterns for conditional routing (format: 'headerName=headerValue,headerName2=headerValue2' where headerName is the HTTP header name and headerValue is the expected value)")
+
 	flagSet.StringVar(&c.WaitMessage, "wait-message", "", fmt.Sprintf("Message to print when %s handler has started", what))
 
 	flagSet.BoolVar(&c.DetailedOutput, "detailed-output", false,
@@ -160,11 +163,8 @@ func (c *Command) AddInterceptFlags(cmd *cobra.Command) {
 		flagSet.Lookup("replace").Deprecated = "Use the replace command."
 	}
 
-	// HTTP Intercepts flags
-	flagSet.StringSliceVar(&c.HTTPHeaderFilters, "http-header", nil,
-		fmt.Sprintf(`HTTP header filters. Only requests with matching headers will be %s. `+
-			`Supports both formats: --http-header "X-User-ID=dev123" or --http-header "X-User-ID: dev123" (curl -H compatible). `+
-			`Multiple headers use AND logic.`, how))
+	// HTTP Intercepts flags - using the single http-header flag above instead
+	// Note: The new HTTP header filters from release/v2 are handled by the single http-header flag
 
 	flagSet.StringSliceVar(&c.HTTPPathEqualFilters, "http-path-equal", nil,
 		fmt.Sprintf(`HTTP path filters. Only requests with matching paths will be %s. `+

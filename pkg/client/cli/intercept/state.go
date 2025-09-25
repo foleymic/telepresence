@@ -64,8 +64,18 @@ func (s *state) SetSelf(self State) {
 }
 
 func (s *state) CreateRequest(ctx context.Context) (*connector.CreateInterceptRequest, error) {
+	// Generate unique intercept name for HTTP intercepts with headers
+	interceptName := s.Name()
+	if s.HttpHeader != "" {
+		// For HTTP intercepts with headers, append the header pattern to make it unique
+		// This allows multiple developers to use the same intercept name
+		headerPattern := strings.ReplaceAll(s.HttpHeader, "=", "-")
+		headerPattern = strings.ReplaceAll(headerPattern, ":", "-")
+		interceptName = fmt.Sprintf("%s-%s", s.Name(), headerPattern)
+	}
+	
 	spec := &manager.InterceptSpec{
-		Name:    s.Name(),
+		Name:    interceptName,
 		Replace: s.Replace,
 	}
 	ir := &connector.CreateInterceptRequest{
@@ -84,17 +94,33 @@ func (s *state) CreateRequest(ctx context.Context) (*connector.CreateInterceptRe
 	spec.Agent = s.AgentName
 	spec.NoDefaultPort = s.NoDefaultPort
 
-	// HTTP Intercepts: populate header filters
-	if len(s.HTTPHeaderFilters) > 0 {
-		spec.HeaderFilters = make(map[string]string, len(s.HTTPHeaderFilters))
-		for _, header := range s.HTTPHeaderFilters {
-			if key, value, err := parseHTTPHeader(header); err == nil {
-				spec.HeaderFilters[key] = value
+	// Handle http-header flag with multiple patterns
+	if s.HttpHeader != "" {
+		// Set mechanism to http
+		spec.Mechanism = "http"
+
+		// Parse the header patterns in format "headerName=headerValue,headerName2=headerValue2"
+		patterns := strings.Split(s.HttpHeader, ",")
+		for _, pattern := range patterns {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				continue
 			}
-			// Note: parseHTTPHeader errors are already caught in validation,
-			// so we can safely ignore them here
+
+			// Parse pattern in format "headerName=headerValue"
+			headerParts := strings.SplitN(pattern, "=", 2)
+			if len(headerParts) != 2 {
+				return nil, errcat.User.Newf("invalid http-header pattern: %s (expected headerName=headerValue)", pattern)
+			}
+			headerName := strings.TrimSpace(headerParts[0])
+			headerValue := strings.TrimSpace(headerParts[1])
+
+			// Add pattern as mechanism arg (port will be determined from --port flag)
+			spec.MechanismArgs = append(spec.MechanismArgs, fmt.Sprintf("--pattern=%s=%s", headerName, headerValue))
 		}
 	}
+	
+	// Add path filters from the new HTTP intercept functionality
 	spec.PathFilters = BuildPathFilters(s.HTTPPathEqualFilters, s.HTTPPathPrefixFilters, s.HTTPPathRegexFilters)
 
 	for _, toPod := range s.ToPod {

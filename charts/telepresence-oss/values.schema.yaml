@@ -45,6 +45,11 @@ properties:
         type: object
         additionalProperties: false
         properties:
+          imagePullSecrets:
+            description: The Secret storing any credentials needed to access the agent image in a private registry
+            type: array
+            items:
+              $ref: "#/$defs/localObjectReference"
           name:
             description: The name of the injected agent image
             type: string

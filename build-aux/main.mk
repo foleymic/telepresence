@@ -215,10 +215,15 @@ endif
 endif
 build-deps: pkg/client/remotefs/fuseftp.bits
 
+# Docker Compose CLI support (optional)
+DOCKER_COMPOSE_SUPPORT ?= 0
+
+ifeq ($(DOCKER_COMPOSE_SUPPORT),1)
 pkg/client/cli/docker/compose/dc-cli.json: go.mod
 	go run cmd/cobraparser/main.go docker compose > $@
 
 build-deps: pkg/client/cli/docker/compose/dc-cli.json
+endif
 
 ifeq ($(GOHOSTOS),windows)
 WINTUN_VERSION=0.14.1

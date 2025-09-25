@@ -32,11 +32,31 @@ func (c *containerState) AddPortHandler(ctx context.Context, pp types.PortAndPro
 func (c *containerState) newPortHandler(pp types.PortAndProto, ics []*agentconfig.Intercept) forwarder.Interceptor {
 	ic := ics[0] // They all have the same protocol container port, so the first one will do.
 	if c.container.Replace == agentconfig.ReplacePolicyIntercept {
-		cp := c.AgentConfig().InterceptorInactivePort(ic.ContainerPort, pp.Proto)
+		var tag tunnel.Tag
+		var cp uint16
+		if ic.TargetPortNumeric {
+			// For multi-port services with explicit port mappings, we should use the container port
+			// directly instead of the proxy port to avoid port calculation issues.
+			// The proxy port calculation (AgentPort + 11 + numberOfPossibleIntercepts) can result
+			// in incorrect port mappings when there are multiple intercepts.
+			if len(ics) > 1 {
+				// Multiple intercepts indicate a multi-port service - use container port directly
+				tag = tunnel.AgentToClient
+				cp = ic.ContainerPort
+			} else {
+				// Single intercept - use proxy port for iptables filtering
+				tag = tunnel.AgentToProxied
+				cp = c.AgentConfig().ProxyPort(ic.ContainerPort)
+			}
+		} else {
+			tag = tunnel.AgentToClient
+			cp = ic.ContainerPort
+		}
 		// Redirect non-intercepted traffic to the pod so that injected sidecars that hijack the ports for
 		// incoming connections will continue to work.
-		targetHost := c.PodIP()
-		return forwarder.NewInterceptor(pp, tunnel.AgentToClient, netip.AddrPortFrom(targetHost, cp))
+		// For containers in the same pod, use localhost instead of pod IP to avoid network connectivity issues
+		targetHost := "127.0.0.1"
+		return forwarder.NewInterceptor(pp, tag, netip.AddrPortFrom(netip.MustParseAddr(targetHost), cp))
 	}
 	// The agent will intercept all traffic intended for this container.
 	return forwarder.NewInterceptor(pp, tunnel.AgentToClient, netip.AddrPort{})

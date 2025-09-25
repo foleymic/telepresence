@@ -110,9 +110,33 @@ var dockerComposeCLI types.CommandInfo //nolint:gochecknoglobals // this is a co
 var dcCli []byte
 
 func init() {
+	// Check if dc-cli.json is available (it might be empty if Docker Compose is not available)
+	if len(dcCli) == 0 {
+		// Docker Compose CLI info not available - create a minimal fallback
+		dockerComposeCLI = types.CommandInfo{
+			Name: "docker compose",
+			Subcommands: []types.CommandInfo{
+				{
+					Name: "help",
+					Usage: "Get help on a command",
+				},
+			},
+		}
+		return
+	}
+
 	err := json.Unmarshal(dcCli, &dockerComposeCLI)
 	if err != nil {
-		panic(err)
+		// If parsing fails, create a minimal fallback
+		dockerComposeCLI = types.CommandInfo{
+			Name: "docker compose",
+			Subcommands: []types.CommandInfo{
+				{
+					Name: "help",
+					Usage: "Get help on a command",
+				},
+			},
+		}
 	}
 }
 

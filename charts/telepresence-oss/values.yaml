@@ -134,6 +134,7 @@ agent:
     "/tmp": Local
   image:
     pullPolicy: IfNotPresent
+    imagePullSecrets: []
   initContainer:
     enabled: true
 
