@@ -96,6 +96,52 @@ func disengage(ctx context.Context, name, container string) error {
 		return err
 	}
 
+	// If no intercept found with exact name, check for HTTP intercepts with header patterns
+	// that have the same display name but different internal names
+	if ic == nil {
+		resp, err := userD.List(ctx, &connector.ListRequest{
+			Filter: connector.ListRequest_INTERCEPTS,
+		})
+		if err != nil {
+			return err
+		}
+
+		// Look for intercepts that match the display name
+		var matchingIntercepts []*manager.InterceptInfo
+		for _, wl := range resp.Workloads {
+			for _, ii := range wl.InterceptInfo {
+				// Check if this intercept has the same display name
+				displayName := ii.Spec.Name
+				if strings.Contains(ii.Spec.Name, "-x-intercept-id-") {
+					// Extract the original name before the header pattern
+					parts := strings.Split(ii.Spec.Name, "-x-intercept-id-")
+					if len(parts) > 0 {
+						displayName = parts[0]
+					}
+				}
+				
+				if displayName == name {
+					// Found a matching intercept
+					matchingIntercepts = append(matchingIntercepts, ii)
+				}
+			}
+		}
+		
+		if len(matchingIntercepts) > 0 {
+			if len(matchingIntercepts) == 1 {
+				// Only one matching intercept, use it
+				ic = matchingIntercepts[0]
+			} else {
+				// Multiple intercepts with same display name, show error with options
+				var interceptNames []string
+				for _, ii := range matchingIntercepts {
+					interceptNames = append(interceptNames, ii.Spec.Name)
+				}
+				return errcat.User.Newf("Multiple intercepts found with name %q. Please specify the full intercept name:\n  %s", name, strings.Join(interceptNames, "\n  "))
+			}
+		}
+	}
+
 	if ic == nil {
 		ig, err = userD.GetIngest(ctx, &connector.IngestIdentifier{
 			WorkloadName:  name,

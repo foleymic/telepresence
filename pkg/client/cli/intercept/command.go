@@ -39,6 +39,7 @@ type Command struct {
 	ServiceName   string   // --service
 	ContainerName string   // --container
 	Address       string   // --address
+	HttpHeader    string   // --http-header (format: "headerName=headerValue,headerName2=headerValue2")
 
 	Replace bool // whether --replace was passed
 	Wiretap bool // wiretap subcommand used
@@ -92,6 +93,8 @@ func (c *Command) AddInterceptFlags(cmd *cobra.Command) {
 	c.DockerFlags.AddFlags(flagSet, how)
 
 	flagSet.StringVar(&c.Mechanism, "mechanism", "tcp", "Which extension `mechanism` to use")
+
+	flagSet.StringVar(&c.HttpHeader, "http-header", "", "HTTP header patterns for conditional routing (format: 'headerName=headerValue,headerName2=headerValue2' where headerName is the HTTP header name and headerValue is the expected value)")
 
 	flagSet.StringVar(&c.WaitMessage, "wait-message", "", fmt.Sprintf("Message to print when %s handler has started", what))
 

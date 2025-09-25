@@ -343,6 +343,11 @@ func StartServices(ctx context.Context, g *dgroup.Group, config Config, srv Stat
 				Product: "telepresence",
 				Version: version.Version,
 			},
+			{
+				Name:    "http",
+				Product: "telepresence",
+				Version: version.Version,
+			},
 		},
 		Containers: containers,
 	}, nil

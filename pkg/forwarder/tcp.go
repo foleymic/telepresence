@@ -1,11 +1,15 @@
 package forwarder
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,6 +124,39 @@ func (f *tcp) forwardConn(clientConn net.Conn) error {
 	f.mu.Unlock()
 
 	ctx = dlog.WithField(ctx, "client", clientConn.RemoteAddr().String())
+
+	// For HTTP intercepts with header requirements, we need to handle them differently
+	// Check if we have any HTTP intercepts (either main intercept or wiretaps)
+	hasHTTPIntercepts := false
+	if intercept != nil && intercept.Spec.Mechanism == "http" && len(intercept.Headers) > 0 {
+		dlog.Debugf(ctx, "Found HTTP intercept with headers: %v", intercept.Headers)
+		hasHTTPIntercepts = true
+	}
+	for _, wt := range f.wiretaps {
+		if wt.Spec.Mechanism == "http" && len(wt.Headers) > 0 {
+			dlog.Debugf(ctx, "Found HTTP wiretap with headers: %v", wt.Headers)
+			hasHTTPIntercepts = true
+			break
+		}
+	}
+	dlog.Debugf(ctx, "hasHTTPIntercepts: %v, intercept: %v, wiretaps: %d", hasHTTPIntercepts, intercept != nil, len(f.wiretaps))
+	if len(f.wiretaps) > 0 {
+		var wiretapIDs []string
+		for id := range f.wiretaps {
+			wiretapIDs = append(wiretapIDs, id)
+		}
+		dlog.Debugf(ctx, "current wiretap IDs in forwarder: %v", wiretapIDs)
+	} else {
+		dlog.Debugf(ctx, "no wiretaps found in forwarder, checking forwarder state...")
+		// Debug: Check if forwarder has any wiretaps at all
+		allWiretapIDs := f.WiretapIDs()
+		dlog.Debugf(ctx, "forwarder.WiretapIDs() returns: %v", allWiretapIDs)
+	}
+
+	if hasHTTPIntercepts {
+		// Use tunnel-based approach for header-based routing with multiple intercepts
+		return f.handleHTTPInterceptWithTunnel(ctx, clientConn, targetHost, targetPort, intercept, wtIntercepts)
+	}
 
 	var targetAddr *net.TCPAddr
 	if targetPort > 0 {
@@ -255,5 +292,174 @@ func (f *tcp) rerouteConn(ctx context.Context, conn net.Conn, clientSession tunn
 		IngressBytes:    ingressBytes.GetValue(),
 		EgressBytes:     egressBytes.GetValue(),
 	})
+	return nil
+}
+
+// handleHTTPInterceptWithTunnel handles HTTP requests with header-based conditional routing using tunnels
+func (f *tcp) handleHTTPInterceptWithTunnel(ctx context.Context, clientConn net.Conn, targetHost string, targetPort uint16, intercept *manager.InterceptInfo, wiretaps []*manager.InterceptInfo) error {
+	// Read the HTTP request to inspect headers while preserving the stream
+	// We need to read the request and buffer it so we can inspect headers
+	// and then replay it to the appropriate destination
+	req, requestData, err := f.readAndBufferHTTPRequest(clientConn)
+	if err != nil {
+		dlog.Errorf(ctx, "Failed to read HTTP request: %v", err)
+		return fmt.Errorf("failed to read HTTP request: %w", err)
+	}
+	dlog.Debugf(ctx, "Successfully read HTTP request: %s %s", req.Method, req.URL.Path)
+
+	// Collect all HTTP intercepts (main intercept + wiretaps)
+	var httpIntercepts []*manager.InterceptInfo
+	if intercept != nil && intercept.Spec.Mechanism == "http" && len(intercept.Headers) > 0 {
+		httpIntercepts = append(httpIntercepts, intercept)
+	}
+	for _, wt := range wiretaps {
+		if wt.Spec.Mechanism == "http" && len(wt.Headers) > 0 {
+			httpIntercepts = append(httpIntercepts, wt)
+		}
+	}
+
+	// Find the best matching intercept based on header patterns
+	var matchingIntercept *manager.InterceptInfo
+	dlog.Debugf(ctx, "Checking %d HTTP intercepts for header patterns", len(httpIntercepts))
+	dlog.Debugf(ctx, "Request headers: %v", req.Header)
+	for _, httpIntercept := range httpIntercepts {
+		dlog.Debugf(ctx, "Intercept %s has headers: %v", httpIntercept.Id, httpIntercept.Headers)
+		// Check if any header matches the patterns
+		for headerName, headerValue := range req.Header {
+			if len(headerValue) > 0 {
+				actualValue := headerValue[0] // Get first header value
+				headerPattern := fmt.Sprintf("%s=%s", headerName, actualValue)
+				dlog.Debugf(ctx, "Checking header pattern: %s", headerPattern)
+
+				// Check for exact match first
+				if _, exists := httpIntercept.Headers[headerPattern]; exists {
+					matchingIntercept = httpIntercept
+					dlog.Debugf(ctx, "Request header %s=%s matches pattern for intercept %s, routing to port %d", headerName, actualValue, httpIntercept.Id, httpIntercept.Spec.TargetPort)
+					break
+				}
+
+				// Check for case-insensitive match
+				lowerHeaderPattern := fmt.Sprintf("%s=%s", strings.ToLower(headerName), actualValue)
+				if _, exists := httpIntercept.Headers[lowerHeaderPattern]; exists {
+					matchingIntercept = httpIntercept
+					dlog.Debugf(ctx, "Request header %s=%s matches pattern (case-insensitive) for intercept %s, routing to port %d", headerName, actualValue, httpIntercept.Id, httpIntercept.Spec.TargetPort)
+					break
+				} else {
+					dlog.Debugf(ctx, "Header pattern %s not found in intercept headers", headerPattern)
+				}
+			}
+		}
+		if matchingIntercept != nil {
+			break
+		}
+	}
+
+	if matchingIntercept != nil {
+		// Route to the matching intercept using the existing tunnel mechanism
+		// The port is already set in the intercept spec from the --port flag
+		replayConn := &replayConn{
+			Conn:        clientConn,
+			requestData: requestData,
+		}
+		return f.interceptConn(ctx, replayConn, matchingIntercept)
+	} else {
+		dlog.Debugf(ctx, "Request does not match any HTTP intercept headers, routing to original service")
+		// Route to original service using direct connection (no intercept)
+		replayConn := &replayConn{
+			Conn:        clientConn,
+			requestData: requestData,
+		}
+		return f.forwardToOriginalServiceDirect(ctx, replayConn, targetHost, targetPort)
+	}
+}
+
+// readAndBufferHTTPRequest reads an HTTP request and returns both the parsed request and the raw data
+func (f *tcp) readAndBufferHTTPRequest(conn net.Conn) (*http.Request, []byte, error) {
+	// Read the request line and headers
+	var requestData bytes.Buffer
+	reader := io.TeeReader(conn, &requestData)
+
+	req, err := http.ReadRequest(bufio.NewReader(reader))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Read the body if present
+	if req.ContentLength > 0 {
+		body := make([]byte, req.ContentLength)
+		_, err = io.ReadFull(reader, body)
+		if err != nil {
+			return nil, nil, err
+		}
+		requestData.Write(body)
+	}
+
+	return req, requestData.Bytes(), nil
+}
+
+// replayConn is a connection that replays buffered data first, then forwards to the underlying connection
+type replayConn struct {
+	net.Conn
+	requestData []byte
+	replayed    bool
+}
+
+func (r *replayConn) Read(b []byte) (n int, err error) {
+	if !r.replayed && len(r.requestData) > 0 {
+		// Replay the buffered request data
+		n = copy(b, r.requestData)
+		r.requestData = r.requestData[n:]
+		if len(r.requestData) == 0 {
+			r.replayed = true
+		}
+		return n, nil
+	}
+	// After replaying, read from the underlying connection
+	return r.Conn.Read(b)
+}
+
+// forwardToOriginalServiceDirect forwards the request to the original service using direct connection
+func (f *tcp) forwardToOriginalServiceDirect(ctx context.Context, clientConn net.Conn, targetHost string, targetPort uint16) error {
+	// Connect to the original service
+	targetAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", targetHost, targetPort))
+	if err != nil {
+		return fmt.Errorf("error resolving target address: %w", err)
+	}
+
+	targetConn, err := net.DialTCP("tcp", nil, targetAddr)
+	if err != nil {
+		return fmt.Errorf("error connecting to target: %w", err)
+	}
+	defer targetConn.Close()
+
+	// Copy data bidirectionally
+	done := make(chan struct{})
+
+	go func() {
+		if _, err := io.Copy(targetConn, clientConn); err != nil && ctx.Err() == nil {
+			dlog.Debugf(ctx, "Error clientConn->targetConn: %+v", err)
+		}
+		_ = targetConn.CloseWrite()
+		done <- struct{}{}
+	}()
+	go func() {
+		if _, err := io.Copy(clientConn, targetConn); err != nil && ctx.Err() == nil {
+			dlog.Debugf(ctx, "Error targetConn->clientConn: %+v", err)
+		}
+		if hwCloser, ok := clientConn.(interface{ CloseWrite() error }); ok {
+			_ = hwCloser.CloseWrite()
+		}
+		done <- struct{}{}
+	}()
+
+	// Wait for both sides to close the connection
+	for numClosed := 0; numClosed < 2; {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-done:
+			numClosed++
+		}
+	}
 	return nil
 }

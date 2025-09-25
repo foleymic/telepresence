@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/datawire/dlib/dlog"
@@ -86,6 +87,26 @@ func (fs *fwdState) HandleIntercepts(ctx context.Context, cepts []*manager.Inter
 		}
 	}
 
+	// Convert HTTP intercepts with headers to wiretaps BEFORE any other processing
+	// This must be done early to prevent wiretap removal issues
+	for _, ii := range waiting {
+		if !ii.Spec.Wiretap && ii.Spec.Mechanism == "http" {
+			// Check if this is an HTTP intercept with header patterns
+			hasHeaderPatterns := false
+			for _, arg := range ii.Spec.MechanismArgs {
+				if strings.HasPrefix(arg, "--pattern=") {
+					hasHeaderPatterns = true
+					break
+				}
+			}
+			if hasHeaderPatterns {
+				// Treat HTTP header-based intercepts as wiretaps to allow multiple intercepts
+				ii.Spec.Wiretap = true
+				dlog.Debugf(ctx, "converted HTTP intercept %s to wiretap", ii.Id)
+			}
+		}
+	}
+
 	var activeIntercept *manager.InterceptInfo
 	if fs.chosenInterceptId != "" {
 		for _, is := range active {
@@ -123,8 +144,82 @@ func (fs *fwdState) HandleIntercepts(ctx context.Context, cepts []*manager.Inter
 	fwd.SetIntercepting(ctx, activeIntercept)
 
 	// Remove inactive wiretaps.
+	// But don't remove wiretaps that are in the waiting list and being converted to wiretaps
+	waitingMap := make(map[string]bool)
+	for _, ii := range waiting {
+		waitingMap[ii.Id] = true
+	}
+	dlog.Debugf(ctx, "waitingMap contains: %v", waitingMap)
+
+	// Debug: Check what's in the active list
+	var activeWiretapIDs []string
+	for _, ii := range active {
+		if ii.Spec.Wiretap {
+			activeWiretapIDs = append(activeWiretapIDs, ii.Id)
+		}
+	}
+	dlog.Debugf(ctx, "active wiretap IDs: %v", activeWiretapIDs)
+
 	for _, id := range fwd.WiretapIDs() {
-		if !slices.ContainsFunc(active, func(ii *manager.InterceptInfo) bool { return ii.Id == id && ii.Spec.Wiretap }) {
+		// Check if this wiretap should be kept
+		shouldKeep := false
+
+		// Keep wiretaps that are in the active list
+		if slices.ContainsFunc(active, func(ii *manager.InterceptInfo) bool { return ii.Id == id && ii.Spec.Wiretap }) {
+			shouldKeep = true
+			dlog.Debugf(ctx, "keeping wiretap id %s (in active list)", id)
+		}
+
+		// Keep wiretaps that are in the waiting list (they might be converted to wiretaps)
+		if !shouldKeep && waitingMap[id] {
+			shouldKeep = true
+			dlog.Debugf(ctx, "keeping wiretap id %s (in waiting list)", id)
+		}
+
+		// Keep wiretaps that correspond to HTTP intercepts with headers (they should be wiretaps)
+		if !shouldKeep {
+			// Check if this wiretap corresponds to an HTTP intercept with headers
+			for _, ii := range active {
+				if ii.Id == id && ii.Spec.Mechanism == "http" && len(ii.Spec.MechanismArgs) > 0 {
+					// Check if this is an HTTP intercept with header patterns
+					hasHeaderPatterns := false
+					for _, arg := range ii.Spec.MechanismArgs {
+						if strings.HasPrefix(arg, "--pattern=") {
+							hasHeaderPatterns = true
+							break
+						}
+					}
+					if hasHeaderPatterns {
+						shouldKeep = true
+						dlog.Debugf(ctx, "keeping wiretap id %s (HTTP intercept with headers)", id)
+						break
+					}
+				}
+			}
+		}
+
+		// Check waiting list too for HTTP intercepts with headers
+		if !shouldKeep {
+			for _, ii := range waiting {
+				if ii.Id == id && ii.Spec.Mechanism == "http" && len(ii.Spec.MechanismArgs) > 0 {
+					// Check if this is an HTTP intercept with header patterns
+					hasHeaderPatterns := false
+					for _, arg := range ii.Spec.MechanismArgs {
+						if strings.HasPrefix(arg, "--pattern=") {
+							hasHeaderPatterns = true
+							break
+						}
+					}
+					if hasHeaderPatterns {
+						shouldKeep = true
+						dlog.Debugf(ctx, "keeping wiretap id %s (HTTP intercept with headers in waiting)", id)
+						break
+					}
+				}
+			}
+		}
+
+		if !shouldKeep {
 			dlog.Debugf(ctx, "removing wiretap id %s", id)
 			fwd.RemoveWiretap(id)
 		}
@@ -136,6 +231,20 @@ func (fs *fwdState) HandleIntercepts(ctx context.Context, cepts []*manager.Inter
 			if !fwd.HasWiretap(ii.Id) {
 				dlog.Debugf(ctx, "adding wiretap id %s to %s", ii.Id, iputil.JoinHostPort(ii.Spec.TargetHost, uint16(ii.Spec.TargetPort)))
 				fwd.AddWiretap(ii)
+			} else {
+				dlog.Debugf(ctx, "wiretap id %s already exists in forwarder", ii.Id)
+			}
+		}
+	}
+
+	// Also add wiretaps from waiting list that have been converted
+	for _, ii := range waiting {
+		if ii.Spec.Wiretap {
+			if !fwd.HasWiretap(ii.Id) {
+				dlog.Debugf(ctx, "adding converted wiretap id %s to %s", ii.Id, iputil.JoinHostPort(ii.Spec.TargetHost, uint16(ii.Spec.TargetPort)))
+				fwd.AddWiretap(ii)
+			} else {
+				dlog.Debugf(ctx, "converted wiretap id %s already exists in forwarder", ii.Id)
 			}
 		}
 	}
@@ -143,6 +252,7 @@ func (fs *fwdState) HandleIntercepts(ctx context.Context, cepts []*manager.Inter
 	// Review waiting intercepts
 	reviews := make([]*manager.ReviewInterceptRequest, 0, len(waiting))
 	for _, ii := range waiting {
+
 		switch {
 		case activeIntercept == nil || ii.Spec.Wiretap:
 			// This intercept is ready to be active
@@ -161,10 +271,51 @@ func (fs *fwdState) HandleIntercepts(ctx context.Context, cepts []*manager.Inter
 				continue
 			}
 			if !ii.Spec.Wiretap {
-				// We can only have one active intercept that isn't a wiretap
-				activeIntercept = ii
+				// For HTTP intercepts with headers, allow multiple intercepts
+				// For other intercepts, we can only have one active intercept that isn't a wiretap
+				if ii.Spec.Mechanism == "http" && len(ii.Spec.MechanismArgs) > 0 {
+					// Check if this is an HTTP intercept with header patterns
+					hasHeaderPatterns := false
+					for _, arg := range ii.Spec.MechanismArgs {
+						if strings.HasPrefix(arg, "--pattern=") {
+							hasHeaderPatterns = true
+							break
+						}
+					}
+					if hasHeaderPatterns {
+						// Allow multiple HTTP intercepts with headers
+						// Don't set activeIntercept to allow multiple
+					} else {
+						// Regular HTTP intercept without headers - only allow one
+						activeIntercept = ii
+					}
+				} else {
+					// Non-HTTP intercept - only allow one
+					activeIntercept = ii
+				}
 			}
-			reviews = append(reviews, &manager.ReviewInterceptRequest{
+			// Process mechanism args to set up header patterns for http mechanism
+			headerPatterns := make(map[string]string) // "headerName=headerValue" -> "true" (just for existence check)
+			mechanismDesc := "all TCP connections"
+
+			if ii.Spec.Mechanism == "http" {
+				mechanismDesc = "HTTP requests"
+				// Parse mechanism args for header pattern configuration
+				for _, arg := range ii.Spec.MechanismArgs {
+					if strings.HasPrefix(arg, "--pattern=") {
+						patternPart := strings.TrimPrefix(arg, "--pattern=")
+						headerPatterns[patternPart] = "true" // Just store the pattern for matching
+					}
+				}
+				if len(headerPatterns) > 0 {
+					mechanismDesc = fmt.Sprintf("HTTP requests with header patterns: %v", headerPatterns)
+				}
+
+				// Store header patterns in the intercept info for the HTTP interceptor to use
+				ii.Headers = headerPatterns
+			}
+
+			review := &manager.ReviewInterceptRequest{
 				Id:                ii.Id,
 				Disposition:       manager.InterceptDispositionType_ACTIVE,
 				PodIp:             fs.PodIP(),
@@ -172,9 +323,16 @@ func (fs *fwdState) HandleIntercepts(ctx context.Context, cepts []*manager.Inter
 				SftpPort:          int32(fs.SftpPort()),
 				MountPoint:        cs.MountPoint(),
 				Mounts:            cs.Mounts().ToRPC(),
-				MechanismArgsDesc: "all TCP connections",
+				MechanismArgsDesc: mechanismDesc,
 				Environment:       cs.Env(),
-			})
+			}
+
+			// Set header patterns if we have any
+			if len(headerPatterns) > 0 {
+				review.Headers = headerPatterns
+			}
+
+			reviews = append(reviews, review)
 		default:
 			// We already have an intercept in play, so reject this one.
 			chosenID := activeIntercept.Id

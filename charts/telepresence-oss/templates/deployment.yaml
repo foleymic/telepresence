@@ -164,7 +164,7 @@ spec:
           - name: AGENT_REGISTRY
             value: {{ .registry }}
           {{- end }}
-          {{- with .pullSecrets }}
+          {{- with .imagePullSecrets }}
           - name: AGENT_IMAGE_PULL_SECRETS
             value: '{{ toJson . }}'
           {{- end }}

@@ -1,0 +1,24 @@
+client:
+  connectionTTL: 6h
+  routing:
+    allowConflictingSubnets: ["10.100.0.0/14", "34.118.224.0/20"]
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+prometheus:
+  port: 9090
+image:
+  registry: quay.io/manhrd
+  name: tel2
+  tag: 2.25.0-7403-g48f5c9692-9BzGuxcRppC5UEyoBlZGLw
+  imagePullSecrets:
+    - name: quay-registry-secret
+
+agent:
+  image:
+    registry: quay.io/manhrd
+    name: tel2
+    tag: 2.25.0-7403-g48f5c9692-9BzGuxcRppC5UEyoBlZGLw
+    imagePullSecrets:
+      - name: quay-registry-secret
