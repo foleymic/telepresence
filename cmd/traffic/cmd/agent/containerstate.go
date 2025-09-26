@@ -37,19 +37,27 @@ func (c *containerState) newPortHandler(pp types.PortAndProto, ics []*agentconfi
 	if c.container.Replace == agentconfig.ReplacePolicyIntercept {
 		var tag tunnel.Tag
 		if ic.TargetPortNumeric {
-			// We must differentiate between connections originating from the agent's forwarder to the container
-			// port and those from other sources. The former should not be routed back, while the latter should
-			// always be routed to the agent. We do this by using a proxy port that will be recognized by the
-			// iptables filtering in our init-container.
-			tag = tunnel.AgentToProxied
-			cp = c.AgentConfig().ProxyPort(ic)
+			// For multi-port services with explicit port mappings, we should use the container port
+			// directly instead of the proxy port to avoid port calculation issues.
+			// The proxy port calculation (AgentPort + 11 + numberOfPossibleIntercepts) can result
+			// in incorrect port mappings when there are multiple intercepts.
+			if len(ics) > 1 {
+				// Multiple intercepts indicate a multi-port service - use container port directly
+				tag = tunnel.AgentToClient
+				cp = ic.ContainerPort
+			} else {
+				// Single intercept - use proxy port for iptables filtering
+				tag = tunnel.AgentToProxied
+				cp = c.AgentConfig().ProxyPort(ic)
+			}
 		} else {
 			tag = tunnel.AgentToClient
 			cp = ic.ContainerPort
 		}
 		// Redirect non-intercepted traffic to the pod so that injected sidecars that hijack the ports for
 		// incoming connections will continue to work.
-		targetHost := c.PodIP()
+		// For containers in the same pod, use localhost instead of pod IP to avoid network connectivity issues
+		targetHost := "127.0.0.1"
 		fwd = forwarder.NewInterceptor(pp, tag, targetHost, cp)
 	} else {
 		// The agent will intercept all traffic intended for this container.

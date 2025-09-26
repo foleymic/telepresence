@@ -78,7 +78,7 @@ Traffic Manager installed successfully
 Let telepresence connect:
 ```console
 $ telepresence connect
- ✔ Connected to context rancher-desktop, namespace default (https://127.0.0.1:6443)       2.4s 
+ ✔ Connected to context rancher-desktop, namespace default (https://127.0.0.1:6443)       2.4s
 ```
 
 A session is now active and outbound connections will be routed to the cluster. I.e. your laptop is logically "inside"
@@ -122,7 +122,7 @@ Add an intercept for the hello deployment on port 9000. Here, we also start a se
 
 ```console
 $ telepresence intercept hello --port 9000 -- python3 -m http.server 9000
- ✔ Intercepted                                                                              2.1s 
+ ✔ Intercepted                                                                              2.1s
 Using Deployment hello
    Intercept name    : hello
    State             : ACTIVE
@@ -166,7 +166,7 @@ End the service with `<ctrl>-C` and then try `curl hello` or `http://hello` agai
 Now end the session too. Your desktop no longer has access to the cluster internals.
 ```console
 $ telepresence quit
- ✔ Disconnected                                                                           0.1s 
+ ✔ Disconnected                                                                           0.1s
 $ curl hello
 curl: (6) Could not resolve host: hello
 ```
@@ -177,7 +177,7 @@ quit command.
 
 ```console
 $ telepresence quit -s
- ✔ Quit                                                                                   0.3s 
+ ✔ Quit                                                                                   0.3s
 ```
 
 ### What got installed in the cluster?
@@ -302,11 +302,11 @@ Containers:
       /var/run/secrets/kubernetes.io/serviceaccount from kube-api-access-zgfs5 (ro)
 Conditions:
   Type                        Status
-  PodReadyToStartContainers   True 
-  Initialized                 True 
-  Ready                       True 
-  ContainersReady             True 
-  PodScheduled                True 
+  PodReadyToStartContainers   True
+  Initialized                 True
+  Ready                       True
+  ContainersReady             True
+  PodScheduled                True
 Volumes:
   kube-api-access-zgfs5:
     Type:                    Projected (a volume that contains injected data from multiple sources)
@@ -316,11 +316,11 @@ Volumes:
     DownwardAPI:             true
   export-volume:
     Type:       EmptyDir (a temporary directory that shares a pod's lifetime)
-    Medium:     
+    Medium:
     SizeLimit:  <unset>
   tel-agent-tmp:
     Type:        EmptyDir (a temporary directory that shares a pod's lifetime)
-    Medium:      
+    Medium:
     SizeLimit:   <unset>
 QoS Class:       BestEffort
 Node-Selectors:  <none>
@@ -386,5 +386,15 @@ Visit the troubleshooting section in the Telepresence documentation for more adv
 [Troubleshooting](https://telepresence.io/docs/troubleshooting/)
 
 Or discuss with the community in the [CNCF Slack](https://communityinviter.com/apps/cloud-native/cncf) in the [#telepresence-oss](https://cloud-native.slack.com/archives/C06B36KJ85P) channel.
+
+## TODO
+
+The following items are planned for future development:
+
+* **Address GCP Load Balancer Intermittent Behavior**: GCP Network Endpoint Group (NEG) annotations can cause intermittent routing issues where the load balancer learns from requests without intercept headers and optimizes routing to bypass the traffic agent for subsequent requests. This results in inconsistent behavior where intercepts work initially but fail after requests without headers, then recover after a timeout period.
+
+* **Support for Regex in HTTP Header Values**: Currently, HTTP header matching only supports exact string matching. Add support for regular expressions in the `--http-header` parameter to enable more flexible header pattern matching for intercepts.
+
+* **Optimize Agent Injection**: Don't restart the traffic agent pod on every new intercept. Investigate whether we're using a mutating webhook and optimize the injection process to avoid unnecessary pod restarts when creating new intercepts.
 
 

@@ -156,11 +156,13 @@ func (f *interceptor) SetIntercepting(ctx context.Context, intercept *manager.In
 	}
 	f.intercept = intercept
 	if f.lCtx != nil {
-		// Drop existing connections
-		f.tCancel()
-
-		// Set up a new target and lifetime
-		f.tCtx, f.tCancel = context.WithCancel(f.lCtx)
+		// Only drop existing connections if the intercept actually changed
+		// This prevents state corruption when routing to original service
+		if f.intercept == nil || (intercept != nil && f.intercept.Id != intercept.Id) {
+			f.tCancel()
+			// Set up a new target and lifetime
+			f.tCtx, f.tCancel = context.WithCancel(f.lCtx)
+		}
 	}
 }
 

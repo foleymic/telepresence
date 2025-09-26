@@ -11,7 +11,7 @@ prometheus:
 image:
   registry: quay.io/manhrd
   name: tel2
-  tag: 2.25.0-7403-g48f5c9692-9BzGuxcRppC5UEyoBlZGLw
+  tag: 2.22.0-alpha.14
   imagePullSecrets:
     - name: quay-registry-secret
 
@@ -19,6 +19,6 @@ agent:
   image:
     registry: quay.io/manhrd
     name: tel2
-    tag: 2.25.0-7403-g48f5c9692-9BzGuxcRppC5UEyoBlZGLw
+    tag: 2.22.0-alpha.14
     imagePullSecrets:
       - name: quay-registry-secret
