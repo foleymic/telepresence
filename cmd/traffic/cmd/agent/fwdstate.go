@@ -308,7 +308,12 @@ func (fs *fwdState) HandleIntercepts(ctx context.Context, cepts []*manager.Inter
 					}
 				}
 				if len(headerPatterns) > 0 {
-					mechanismDesc = fmt.Sprintf("HTTP requests with header patterns: %v", headerPatterns)
+					// Create a cleaner display format without the ":true" values
+					var patternList []string
+					for pattern := range headerPatterns {
+						patternList = append(patternList, pattern)
+					}
+					mechanismDesc = fmt.Sprintf("HTTP requests with header patterns: %s", strings.Join(patternList, ", "))
 				}
 
 				// Store header patterns in the intercept info for the HTTP interceptor to use
