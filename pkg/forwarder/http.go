@@ -143,12 +143,17 @@ func (h *httpInterceptor) handleHTTPConn(clientConn net.Conn) error {
 func (h *httpInterceptor) shouldInterceptRequest(ctx context.Context, req *http.Request, headerFilters map[string]string, pathFilters []string) bool {
 	// Check header filters (AND logic - all must match)
 	for key, expectedValue := range headerFilters {
-		actualValue := req.Header.Get(key)
+		// Make header name case-insensitive
+		canonicalKey := http.CanonicalHeaderKey(key)
+		actualValue := req.Header.Get(canonicalKey)
+		dlog.Debugf(ctx, "HEADER CHECK: Comparing header %s=%s against filter %s=%s",
+			canonicalKey, actualValue, canonicalKey, expectedValue)
 		if !h.matchesPattern(actualValue, expectedValue) {
-			dlog.Debugf(ctx, "Request header %s=%s does not match filter %s=%s",
-				key, actualValue, key, expectedValue)
+			dlog.Debugf(ctx, "HEADER CHECK: Request header %s=%s does not match filter %s=%s",
+				canonicalKey, actualValue, canonicalKey, expectedValue)
 			return false
 		}
+		dlog.Debugf(ctx, "HEADER CHECK: Header matched!")
 	}
 
 	// Check path filters (OR logic - any must match)
@@ -190,13 +195,48 @@ func (h *httpInterceptor) shouldInterceptRequest(ctx context.Context, req *http.
 }
 
 func (h *httpInterceptor) matchesPattern(value, pattern string) bool {
-	// Support wildcard matching with *
-	if strings.Contains(pattern, "*") {
-		matched, _ := filepath.Match(pattern, value)
+	dlog.Debugf(context.Background(), "MATCH: Comparing value %q against pattern %q", value, pattern)
+
+	// Normalize value and pattern by replacing : with = to match how patterns are stored
+	// We need to handle :: specially to preserve it as a separator
+	normalizedValue := strings.ReplaceAll(value, "::", "__DBLCOL__")
+	normalizedValue = strings.ReplaceAll(normalizedValue, ":", "=")
+	normalizedValue = strings.ReplaceAll(normalizedValue, "__DBLCOL__", "::")
+
+	normalizedPattern := strings.ReplaceAll(pattern, "::", "__DBLCOL__")
+	normalizedPattern = strings.ReplaceAll(normalizedPattern, ":", "=")
+	normalizedPattern = strings.ReplaceAll(normalizedPattern, "__DBLCOL__", "::")
+
+	dlog.Debugf(context.Background(), "MATCH: Normalized value %q against pattern %q", normalizedValue, normalizedPattern)
+
+	// If pattern contains .* treat it as a regex pattern
+	if strings.Contains(normalizedPattern, ".*") {
+		// Convert the pattern to a proper regex by escaping special characters
+		// except for .* which we want to keep as a wildcard
+		parts := strings.Split(normalizedPattern, ".*")
+		for i, part := range parts {
+			parts[i] = regexp.QuoteMeta(part)
+		}
+		regexPattern := strings.Join(parts, ".*")
+		matched, err := regexp.MatchString("^"+regexPattern+"$", normalizedValue)
+		dlog.Debugf(context.Background(), "MATCH: Regex %q against %q = %v (err: %v)", regexPattern, normalizedValue, matched, err)
+		if err != nil {
+			return false
+		}
 		return matched
 	}
+
+	// Support wildcard matching with *
+	if strings.Contains(pattern, "*") {
+		matched, _ := filepath.Match(normalizedPattern, normalizedValue)
+		dlog.Debugf(context.Background(), "MATCH: Wildcard %q against %q = %v", normalizedPattern, normalizedValue, matched)
+		return matched
+	}
+
 	// Exact match
-	return value == pattern
+	matched := normalizedValue == normalizedPattern
+	dlog.Debugf(context.Background(), "MATCH: Exact %q against %q = %v", normalizedPattern, normalizedValue, matched)
+	return matched
 }
 
 func (h *httpInterceptor) interceptHTTPConn(ctx context.Context, clientConn net.Conn, req *http.Request, iCept *manager.InterceptInfo) error {

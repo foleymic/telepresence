@@ -327,24 +327,38 @@ func (f *tcp) handleHTTPInterceptWithTunnel(ctx context.Context, clientConn net.
 		for headerName, headerValue := range req.Header {
 			if len(headerValue) > 0 {
 				actualValue := headerValue[0]
-				headerPattern := fmt.Sprintf("%s=%s", headerName, actualValue)
-				dlog.Debugf(ctx, "Checking header pattern: %s", headerPattern)
+				canonicalKey := http.CanonicalHeaderKey(headerName)
 
-				// Check for exact match first
-				if _, exists := httpIntercept.Headers[headerPattern]; exists {
-					matchingIntercept = httpIntercept
-					dlog.Debugf(ctx, "Request header %s=%s matches pattern for intercept %s, routing to port %d", headerName, actualValue, httpIntercept.Id, httpIntercept.Spec.TargetPort)
-					break
+				// Check if this header has a pattern
+				if pattern, exists := httpIntercept.Headers[canonicalKey]; exists {
+					dlog.Debugf(ctx, "Checking header %s=%s against pattern %s", canonicalKey, actualValue, pattern)
+
+					// Use the HTTP interceptor's pattern matching logic
+					httpInterceptor := &httpInterceptor{}
+					if httpInterceptor.matchesPattern(actualValue, pattern) {
+						matchingIntercept = httpIntercept
+						dlog.Debugf(ctx, "Request header %s=%s matches pattern %s for intercept %s, routing to port %d",
+							canonicalKey, actualValue, pattern, httpIntercept.Id, httpIntercept.Spec.TargetPort)
+						break
+					} else {
+						dlog.Debugf(ctx, "Header %s=%s does not match pattern %s", canonicalKey, actualValue, pattern)
+					}
 				}
-
 				// Check for case-insensitive match
-				lowerHeaderPattern := fmt.Sprintf("%s=%s", strings.ToLower(headerName), actualValue)
-				if _, exists := httpIntercept.Headers[lowerHeaderPattern]; exists {
-					matchingIntercept = httpIntercept
-					dlog.Debugf(ctx, "Request header %s=%s matches pattern (case-insensitive) for intercept %s, routing to port %d", headerName, actualValue, httpIntercept.Id, httpIntercept.Spec.TargetPort)
-					break
-				} else {
-					dlog.Debugf(ctx, "Header pattern %s not found in intercept headers", headerPattern)
+				lowerKey := strings.ToLower(canonicalKey)
+				if pattern, exists := httpIntercept.Headers[lowerKey]; exists {
+					dlog.Debugf(ctx, "Checking header %s=%s against pattern %s (case-insensitive)", lowerKey, actualValue, pattern)
+
+					// Use the HTTP interceptor's pattern matching logic
+					httpInterceptor := &httpInterceptor{}
+					if httpInterceptor.matchesPattern(actualValue, pattern) {
+						matchingIntercept = httpIntercept
+						dlog.Debugf(ctx, "Request header %s=%s matches pattern %s for intercept %s (case-insensitive), routing to port %d",
+							lowerKey, actualValue, pattern, httpIntercept.Id, httpIntercept.Spec.TargetPort)
+						break
+					} else {
+						dlog.Debugf(ctx, "Header %s=%s does not match pattern %s (case-insensitive)", lowerKey, actualValue, pattern)
+					}
 				}
 			}
 		}

@@ -98,6 +98,14 @@ func TestHTTPInterceptor_matchesPattern(t *testing.T) {
 		{"complex wildcard", "dev-user-123", "dev-*-123", true},
 		{"empty value", "", "dev*", false},
 		{"empty pattern", "dev123", "", false},
+		// Regex pattern tests
+		{"simple regex match", "user1dddd12345", "user1dddd.*", true},
+		{"regex with separator =", "x-intercept-id=user1=comp1", "x-intercept-id=user1=.*", true},
+		{"regex with separator :", "x-intercept-id:user1::comp1", "x-intercept-id:user1::.*", true},
+		{"regex with mixed separators", "x-intercept-id:user1::comp1", "x-intercept-id=user1::.*", true},
+		{"regex no match", "user2dddd12345", "user1dddd.*", false},
+		{"regex with special chars", "user.1[test]", "user.1[.*]", true},
+		{"regex empty value", "", "user1.*", false},
 	}
 
 	for _, tt := range tests {

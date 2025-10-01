@@ -321,14 +321,17 @@ func (fs *fwdState) HandlePort(ctx context.Context, cepts []*manager.InterceptIn
 				for _, arg := range ii.Spec.MechanismArgs {
 					if strings.HasPrefix(arg, "--pattern=") {
 						patternPart := strings.TrimPrefix(arg, "--pattern=")
-						headerPatterns[patternPart] = "true" // Just store the pattern for matching
+						// Split into header name and value
+						parts := strings.SplitN(patternPart, "=", 2)
+						if len(parts) == 2 {
+							headerPatterns[parts[0]] = parts[1] // Store the actual pattern value
+						}
 					}
 				}
 				if len(headerPatterns) > 0 {
-					// Create a cleaner display format without the ":true" values
 					var patternList []string
-					for pattern := range headerPatterns {
-						patternList = append(patternList, pattern)
+					for name, value := range headerPatterns {
+						patternList = append(patternList, fmt.Sprintf("%s=%s", name, value))
 					}
 					mechanismDesc = fmt.Sprintf("HTTP requests with header patterns: %s", strings.Join(patternList, ", "))
 				}

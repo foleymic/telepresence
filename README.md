@@ -391,10 +391,12 @@ Or discuss with the community in the [CNCF Slack](https://communityinviter.com/a
 
 The following items are planned for future development:
 
-* **Address GCP Load Balancer Intermittent Behavior**: GCP Network Endpoint Group (NEG) annotations can cause intermittent routing issues where the load balancer learns from requests without intercept headers and optimizes routing to bypass the traffic agent for subsequent requests. This results in inconsistent behavior where intercepts work initially but fail after requests without headers, then recover after a timeout period.
+* ~~**Address GCP Load Balancer Intermittent Behavior**: GCP Network Endpoint Group (NEG) annotations can cause intermittent routing issues where the load balancer learns from requests without intercept headers and optimizes routing to bypass the traffic agent for subsequent requests. This results in inconsistent behavior where intercepts work initially but fail after requests without headers, then recover after a timeout period.~~ ✅ **COMPLETED**: Implemented HTTP-aware forwarding that properly handles persistent connections and ensures each request is evaluated for header-based routing, preventing load balancer optimization from bypassing the traffic agent.
 
-* **Support for Regex in HTTP Header Values**: Currently, HTTP header matching only supports exact string matching. Add support for regular expressions in the `--http-header` parameter to enable more flexible header pattern matching for intercepts.
+* ~~**Support for Regex in HTTP Header Values**: Currently, HTTP header matching only supports exact string matching. Add support for regular expressions in the `--http-header` parameter to enable more flexible header pattern matching for intercepts.~~ ✅ **COMPLETED**: Added support for regex patterns in header values using `.*` wildcard, allowing flexible pattern matching like `--http-header="x-intercept-id=user1::.*"`.
 
 * ~~**Optimize Agent Injection**: Don't restart the traffic agent pod on every new intercept. Investigate whether we're using a mutating webhook and optimize the injection process to avoid unnecessary pod restarts when creating new intercepts.~~ ✅ **COMPLETED**: OnDemand injection is now working correctly - multiple intercepts can be added to the same pod without requiring pod restarts.
+
+* ~~**Support --preview-url in the CLI**: The licensed version has this as an option and is defaulted to true.  Rubikon sets this to false.  In order to allow rubikon to support both licensed and OSS versions of telepresence, we need to add this option to the CLI but can make it no-op just for compatability.~~ ✅ **COMPLETED**: Added `--preview-url` flag (short form `-u`) as a no-op boolean option defaulting to false for compatibility with the licensed version.
 
 

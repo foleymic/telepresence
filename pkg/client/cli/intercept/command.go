@@ -149,9 +149,12 @@ func (c *Command) AddInterceptFlags(cmd *cobra.Command) {
 
 	flagSet.StringVar(&c.Mechanism, "mechanism", "tcp", "Which extension `mechanism` to use")
 
-	flagSet.StringVar(&c.HttpHeader, "http-header", "", "HTTP header patterns for conditional routing (format: 'headerName=headerValue,headerName2=headerValue2' where headerName is the HTTP header name and headerValue is the expected value)")
+	flagSet.StringVar(&c.HttpHeader, "http-header", "", "HTTP header patterns for conditional routing (format: 'headerName=headerValue,headerName2=headerValue2' where headerName is the HTTP header name and headerValue is the expected value or a regex pattern ending with ::.*)")
 
 	flagSet.StringVar(&c.WaitMessage, "wait-message", "", fmt.Sprintf("Message to print when %s handler has started", what))
+
+	// No-op preview-url flag for compatibility with licensed version
+	flagSet.BoolP("preview-url", "u", false, "NO-OP - used for compatibility with licensed telepresence version")
 
 	flagSet.BoolVar(&c.DetailedOutput, "detailed-output", false,
 		fmt.Sprintf(`Provide very detailed info about the %s when used together with --output=json or --output=yaml'`, what))
