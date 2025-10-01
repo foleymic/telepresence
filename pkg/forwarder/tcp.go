@@ -362,16 +362,66 @@ func (f *tcp) handleHTTPInterceptWithTunnel(ctx context.Context, clientConn net.
 		}
 		return f.interceptConn(ctx, replayConn, matchingIntercept)
 	} else {
-		dlog.Debugf(ctx, "Request does not match any HTTP intercept headers, routing to original service")
-		// Route to original service using direct connection (no intercept)
-		// Don't modify the intercept state when routing to original service
-		// This prevents state corruption that causes intermittent failures
-		replayConn := &replayConn{
-			Conn:        clientConn,
-			requestData: requestData,
-		}
-		return f.forwardToOriginalServiceDirect(ctx, replayConn, targetHost, targetPort)
+		dlog.Debugf(ctx, "DECISION: no header match; forwarding single HTTP request to %s:%d", targetHost, targetPort)
+		// HTTP-aware forwarding of a single request to avoid relying on EOF for response completion
+		return f.forwardSingleHTTPRequest(ctx, clientConn, req, requestData, targetHost, targetPort)
 	}
+}
+
+// forwardSingleHTTPRequest forwards exactly one HTTP request (request line + headers + buffered body)
+// to the original service, then returns, allowing the HTTP loop to read the next request on the same
+// client connection and re-evaluate headers. This avoids pinning the entire TCP stream directly to the
+// upstream when there are header-based intercepts and prevents timeouts due to keep-alive.
+func (f *tcp) forwardSingleHTTPRequest(
+	ctx context.Context,
+	clientConn net.Conn,
+	req *http.Request,
+	requestData []byte,
+	targetHost string,
+	targetPort uint16,
+) error {
+	dlog.Debugf(ctx, "ROUTE: forwardSingleHTTPRequest -> %s:%d", targetHost, targetPort)
+
+	// Establish upstream TCP connection
+	targetAddr := fmt.Sprintf("%s:%d", targetHost, targetPort)
+	upstream, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("error connecting to target: %w", err)
+	}
+	defer upstream.Close()
+
+	// Re-serialize the request with Connection: close to ensure upstream closes after response
+	reqUp := req.Clone(req.Context())
+	reqUp.RequestURI = ""
+	reqUp.Close = true
+	reqUp.Header.Del("Connection")
+	reqUp.Header.Set("Connection", "close")
+
+	// If there was a body, ensure Body is readable
+	if reqUp.Body == nil && req.Body != nil {
+		reqUp.Body = req.Body
+	}
+
+	if err := reqUp.Write(upstream); err != nil {
+		return fmt.Errorf("error writing request to target: %w", err)
+	}
+
+	// Read a single HTTP response from upstream and write it to the client
+	if err := upstream.SetReadDeadline(time.Now().Add(30 * time.Second)); err == nil {
+	}
+	upr := bufio.NewReader(upstream)
+	resp, err := http.ReadResponse(upr, reqUp)
+	if err != nil {
+		return fmt.Errorf("error reading response from target: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := resp.Write(clientConn); err != nil {
+		return fmt.Errorf("error writing response to client: %w", err)
+	}
+
+	dlog.Debugf(ctx, "ROUTE: forwardSingleHTTPRequest completed for %s %s with status %s", req.Method, req.URL.Path, resp.Status)
+	return nil
 }
 
 // readAndBufferHTTPRequest reads an HTTP request and returns both the parsed request and the raw data
@@ -389,10 +439,11 @@ func (f *tcp) readAndBufferHTTPRequest(conn net.Conn) (*http.Request, []byte, er
 	// Read the body if present
 	if req.ContentLength > 0 {
 		body := make([]byte, req.ContentLength)
-		_, err = io.ReadFull(bufferedReader, body)
-		if err != nil {
+		if _, err = io.ReadFull(bufferedReader, body); err != nil {
 			return nil, nil, err
 		}
+		// Reset request body so it can be re-sent downstream if needed
+		req.Body = io.NopCloser(bytes.NewReader(body))
 	}
 
 	return req, requestData.Bytes(), nil

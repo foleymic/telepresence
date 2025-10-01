@@ -152,7 +152,10 @@ func sftpServer(ctx context.Context, sftpPortCh chan<- uint16) error {
 
 func Main(ctx context.Context, _ ...string) error {
 	debug.SetTraceback("single")
-	dlog.Infof(ctx, "Traffic Agent %s", version.Version)
+	dlog.Infof(ctx, "==============================")
+	dlog.Infof(ctx, "Traffic Agent starting")
+	dlog.Infof(ctx, "TELEPRESENCE_VERSION=%s", version.Version)
+	dlog.Infof(ctx, "==============================")
 
 	ctx, cancel := context.WithCancel(ctx)
 	sigs := make(chan os.Signal, 1)
@@ -252,6 +255,8 @@ func TalkToManagerLoop(ctx context.Context, s State, info *rpc.AgentInfo) {
 }
 
 func StartServices(ctx context.Context, g *dgroup.Group, config Config, srv State) (*rpc.AgentInfo, error) {
+	// Log agent version at startup to aid debugging deployments
+	dlog.Infof(ctx, "Traffic Agent starting, TELEPRESENCE_VERSION=%s", version.Version)
 	ac := config.AgentConfig()
 	grpcPortCh := make(chan uint16)
 	g.Go("tunneling", func(ctx context.Context) error {
