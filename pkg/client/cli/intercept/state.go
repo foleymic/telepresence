@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	grpcCodes "google.golang.org/grpc/codes"
@@ -64,19 +65,51 @@ func (s *state) SetSelf(self State) {
 }
 
 func (s *state) CreateRequest(ctx context.Context) (*connector.CreateInterceptRequest, error) {
-	// Generate unique intercept name for HTTP intercepts with headers
-	interceptName := s.Name()
-	if s.HttpHeader != "" {
-		// For HTTP intercepts with headers, append the header pattern to make it unique
-		// This allows multiple developers to use the same intercept name
-		headerPattern := strings.ReplaceAll(s.HttpHeader, "=", "-")
-		headerPattern = strings.ReplaceAll(headerPattern, ":", "-")
-		interceptName = fmt.Sprintf("%s-%s", s.Name(), headerPattern)
+	// Get machine hostname for intercept tracking
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = "unknown"
 	}
-	
+
+	// Get current intercepts to determine sequence number
+	ud := daemon.MustGetUserClient(ctx)
+	resp, err := ud.List(ctx, &connector.ListRequest{
+		Filter: connector.ListRequest_INTERCEPTS,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Count existing intercepts from this machine for this workload
+	sequence := 1
+	for _, wl := range resp.Workloads {
+		for _, ii := range wl.InterceptInfo {
+			if ii.Spec.Metadata != nil &&
+				ii.Spec.Metadata["machine_id"] == hostname &&
+				strings.HasPrefix(ii.Spec.Name, s.Name()) {
+				sequence++
+			}
+		}
+	}
+
+	// Generate unique internal name using workload name, hostname, and sequence
+	internalName := fmt.Sprintf("%s-%s-%d",
+		s.Name(), hostname, sequence)
+
+	// Generate display name
+	displayName := s.Name()
+	if sequence > 1 {
+		displayName = fmt.Sprintf("%s-%d", s.Name(), sequence)
+	}
+
 	spec := &manager.InterceptSpec{
-		Name:    interceptName,
+		Name:    internalName,
 		Replace: s.Replace,
+		Metadata: map[string]string{
+			"machine_id":   hostname,
+			"display_name": displayName,
+			"sequence":     strconv.Itoa(sequence),
+		},
 	}
 	ir := &connector.CreateInterceptRequest{
 		Spec:           spec,
@@ -119,7 +152,7 @@ func (s *state) CreateRequest(ctx context.Context) (*connector.CreateInterceptRe
 			spec.MechanismArgs = append(spec.MechanismArgs, fmt.Sprintf("--pattern=%s=%s", headerName, headerValue))
 		}
 	}
-	
+
 	// Add path filters from the new HTTP intercept functionality
 	spec.PathFilters = BuildPathFilters(s.HTTPPathEqualFilters, s.HTTPPathPrefixFilters, s.HTTPPathRegexFilters)
 
@@ -130,8 +163,6 @@ func (s *state) CreateRequest(ctx context.Context) (*connector.CreateInterceptRe
 		}
 		spec.LocalPorts = append(spec.LocalPorts, pp.String())
 	}
-
-	ud := daemon.MustGetUserClient(ctx)
 
 	// Parse port into spec based on how it's formatted
 	s.localPort, s.dockerPort, spec.PortIdentifier = 0, 0, ""

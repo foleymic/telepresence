@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/datawire/dlib/dlog"
 	"github.com/telepresenceio/telepresence/rpc/v2/connector"
+	"github.com/telepresenceio/telepresence/rpc/v2/manager"
 	"github.com/telepresenceio/telepresence/v2/pkg/client"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/ann"
 	"github.com/telepresenceio/telepresence/v2/pkg/client/cli/connect"
@@ -189,7 +191,25 @@ func (s *listCommand) printList(ctx context.Context, workloads []*connector.Work
 
 	state := func(workload *connector.WorkloadInfo) string {
 		if iis, igs := workload.InterceptInfo, workload.IngestInfo; len(iis)+len(igs) > 0 {
-			return intercept.DescribeIntercepts(ctx, iis, igs, nil, s.debug)
+			// Get current machine's hostname
+			hostname, err := os.Hostname()
+			if err != nil {
+				hostname = "unknown"
+			}
+
+			// Filter intercepts to only show those from this machine
+			var myIntercepts []*manager.InterceptInfo
+			for _, ii := range iis {
+				if ii.Spec.Metadata != nil && ii.Spec.Metadata["machine_id"] == hostname {
+					// Use display name if available
+					if displayName, ok := ii.Spec.Metadata["display_name"]; ok {
+						ii.Spec.Name = displayName
+					}
+					myIntercepts = append(myIntercepts, ii)
+				}
+			}
+
+			return intercept.DescribeIntercepts(ctx, myIntercepts, igs, nil, s.debug)
 		}
 		if workload.NotInterceptableReason == "Progressing" {
 			return "progressing..."

@@ -194,6 +194,9 @@ message InterceptSpec {
   // Path filter patterns for HTTP Intercepts. Supports glob patterns like "/api/v1/*".
   // If specified, only requests matching these paths will be intercepted.
   repeated string path_filters = 28;
+
+  // Metadata for storing additional information about the intercept
+  map<string,string> metadata = 29;
 }
 
 enum InterceptDispositionType {

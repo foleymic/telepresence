@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -96,9 +97,14 @@ func disengage(ctx context.Context, name, container string) error {
 		return err
 	}
 
-	// If no intercept found with exact name, check for HTTP intercepts with header patterns
-	// that have the same display name but different internal names
+	// If no intercept found with exact name, check for intercepts from this machine
 	if ic == nil {
+		// Get current machine's hostname
+		hostname, err := os.Hostname()
+		if err != nil {
+			hostname = "unknown"
+		}
+
 		resp, err := userD.List(ctx, &connector.ListRequest{
 			Filter: connector.ListRequest_INTERCEPTS,
 		})
@@ -106,38 +112,32 @@ func disengage(ctx context.Context, name, container string) error {
 			return err
 		}
 
-		// Look for intercepts that match the display name
+		// Look for intercepts from this machine that match the name
 		var matchingIntercepts []*manager.InterceptInfo
 		for _, wl := range resp.Workloads {
 			for _, ii := range wl.InterceptInfo {
-				// Check if this intercept has the same display name
-				displayName := ii.Spec.Name
-				if strings.Contains(ii.Spec.Name, "-x-intercept-id-") {
-					// Extract the original name before the header pattern
-					parts := strings.Split(ii.Spec.Name, "-x-intercept-id-")
-					if len(parts) > 0 {
-						displayName = parts[0]
+				// Check if this intercept is from this machine
+				if ii.Spec.Metadata != nil && ii.Spec.Metadata["machine_id"] == hostname {
+					// Check if the display name matches
+					if displayName, ok := ii.Spec.Metadata["display_name"]; ok && displayName == name {
+						matchingIntercepts = append(matchingIntercepts, ii)
 					}
-				}
-				
-				if displayName == name {
-					// Found a matching intercept
-					matchingIntercepts = append(matchingIntercepts, ii)
 				}
 			}
 		}
-		
+
 		if len(matchingIntercepts) > 0 {
 			if len(matchingIntercepts) == 1 {
-				// Only one matching intercept, use it
+				// Only one matching intercept from this machine, use it
 				ic = matchingIntercepts[0]
 			} else {
-				// Multiple intercepts with same display name, show error with options
+				// Multiple intercepts from this machine, show error with options
 				var interceptNames []string
 				for _, ii := range matchingIntercepts {
-					interceptNames = append(interceptNames, ii.Spec.Name)
+					displayName := ii.Spec.Metadata["display_name"]
+					interceptNames = append(interceptNames, displayName)
 				}
-				return errcat.User.Newf("Multiple intercepts found with name %q. Please specify the full intercept name:\n  %s", name, strings.Join(interceptNames, "\n  "))
+				return errcat.User.Newf("Multiple intercepts found with name %q on this machine. Please specify one of:\n  %s", name, strings.Join(interceptNames, "\n  "))
 			}
 		}
 	}
