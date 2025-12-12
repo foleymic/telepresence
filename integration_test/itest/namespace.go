@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -87,7 +88,13 @@ func WithNamespacePair(ctx context.Context, suffix string, f func(NamespacePair)
 	s.Selector = labels.SelectorFromNames(namespace)
 	getT(ctx).Run(fmt.Sprintf("Test_Namespaces_%s", suffix), func(t *testing.T) {
 		ctx = WithT(ctx, t)
-		ctx = WithUser(ctx, s.Namespace+":"+TestUser)
+		// If reusing an existing manager namespace, do not impersonate the test ServiceAccount.
+		// Rely on the current kube-context user instead.
+		if os.Getenv("TELEPRESENCE_TEST_MANAGER_NAMESPACE") != "" {
+			ctx = WithUser(ctx, "default")
+		} else {
+			ctx = WithUser(ctx, s.Namespace+":"+TestUser)
+		}
 		ctx = WithNamespaces(ctx, &s.Namespaces)
 		s.Harness = NewContextHarness(ctx)
 		s.PushHarness(ctx, s.setup, s.tearDown)
@@ -97,35 +104,56 @@ func WithNamespacePair(ctx context.Context, suffix string, f func(NamespacePair)
 }
 
 func (s *nsPair) setup(ctx context.Context) bool {
-	CreateNamespaces(ctx, s.AppNamespace(), s.Namespace)
+	// Create only the app namespace when reusing an existing manager namespace.
+	if os.Getenv("TELEPRESENCE_TEST_MANAGER_NAMESPACE") != "" {
+		CreateNamespaces(ctx, s.AppNamespace())
+	} else {
+		CreateNamespaces(ctx, s.AppNamespace(), s.Namespace)
+	}
 	t := getT(ctx)
 	if t.Failed() {
 		return false
 	}
-	err := Kubectl(ctx, s.Namespace, "apply", "-f", filepath.Join(GetOSSRoot(ctx), "testdata", "k8s", "client_sa.yaml"))
-	if assert.NoError(t, err, "failed to create connect ServiceAccount") {
-		db, err := ReadTemplate(ctx, filepath.Join(GetOSSRoot(ctx), "testdata", "k8s", "client_rancher.goyaml"), map[string]string{
-			"ManagerNamespace": s.Namespace,
-		})
-		if assert.NoError(t, err) {
-			assert.NoError(t, Kubectl(dos.WithStdin(ctx, bytes.NewReader(db)), s.Namespace, "apply", "-f", "-"))
+	// Only apply the test ServiceAccount and rancher config when we own the manager namespace.
+	if os.Getenv("TELEPRESENCE_TEST_MANAGER_NAMESPACE") == "" {
+		err := Kubectl(ctx, s.Namespace, "apply", "-f", filepath.Join(GetOSSRoot(ctx), "testdata", "k8s", "client_sa.yaml"))
+		if assert.NoError(t, err, "failed to create connect ServiceAccount") {
+			db, err := ReadTemplate(ctx, filepath.Join(GetOSSRoot(ctx), "testdata", "k8s", "client_rancher.goyaml"), map[string]string{
+				"ManagerNamespace": s.Namespace,
+			})
+			if assert.NoError(t, err) {
+				assert.NoError(t, Kubectl(dos.WithStdin(ctx, bytes.NewReader(db)), s.Namespace, "apply", "-f", "-"))
+			}
 		}
 	}
 	return !t.Failed()
 }
 
 func AppAndMgrNSName(suffix string) (appNS, mgrNS string) {
-	mgrNS = fmt.Sprintf("ambassador-%s", suffix)
+	// Allow overriding the manager namespace to reuse an existing traffic-manager.
+	if ns := os.Getenv("TELEPRESENCE_TEST_MANAGER_NAMESPACE"); ns != "" {
+		mgrNS = ns
+	} else {
+		mgrNS = fmt.Sprintf("ambassador-%s", suffix)
+	}
 	appNS = fmt.Sprintf("telepresence-%s", suffix)
 	return appNS, mgrNS
 }
 
 func (s *nsPair) tearDown(ctx context.Context) {
+	if os.Getenv("TELEPRESENCE_TEST_SKIP_TEARDOWN") != "" {
+		return
+	}
 	wg := sync.WaitGroup{}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		DeleteNamespaces(ctx, s.AppNamespace(), s.Namespace)
+		// Never delete a reused manager namespace.
+		if os.Getenv("TELEPRESENCE_TEST_MANAGER_NAMESPACE") != "" {
+			DeleteNamespaces(ctx, s.AppNamespace())
+		} else {
+			DeleteNamespaces(ctx, s.AppNamespace(), s.Namespace)
+		}
 	}()
 	wg.Add(1)
 	go func() {

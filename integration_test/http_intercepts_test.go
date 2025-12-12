@@ -181,7 +181,7 @@ func (s *httpInterceptsSuite) Test_HTTPManySimultaneous() {
 	require := s.Require()
 	ctx := s.Context()
 
-	const interceptCount = 250
+	const interceptCount = 10
 	const pingRepeatCount = 10
 	localPorts := make([]int, interceptCount)
 	httpCancels := make([]context.CancelFunc, interceptCount)

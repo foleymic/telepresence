@@ -3,6 +3,7 @@ package itest
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 )
 
@@ -32,6 +33,9 @@ func (h *singleService) setup(ctx context.Context) bool {
 }
 
 func (h *singleService) tearDown(ctx context.Context) {
+	if os.Getenv("TELEPRESENCE_TEST_SKIP_TEARDOWN") != "" {
+		return
+	}
 	h.DeleteSvcAndWorkload(ctx, "deploy", h.serviceName)
 }
 

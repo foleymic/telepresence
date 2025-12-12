@@ -397,6 +397,8 @@ func (s *cluster) ensureNoManager(ctx context.Context) {
 	var es []map[string]any
 	err = json.Unmarshal([]byte(out), &es)
 	require.NoError(t, err)
+	// If reusing an existing manager namespace, allow a pre-existing traffic-manager there.
+	reuseNs := os.Getenv("TELEPRESENCE_TEST_MANAGER_NAMESPACE")
 	for {
 		ix := slices.IndexFunc(es, func(v map[string]any) bool {
 			return v["name"] == "traffic-manager"
@@ -407,6 +409,10 @@ func (s *cluster) ensureNoManager(ctx context.Context) {
 		e := es[ix]
 		es = slices.Delete(es, ix, ix+1)
 		ns := e["namespace"].(string)
+		if reuseNs != "" && ns == reuseNs {
+			// Reuse existing manager in the configured namespace.
+			continue
+		}
 		if regexp.MustCompile(`^ambassador-[0-9a-f]+(-[0-9])?$`).MatchString(ns) {
 			s.UninstallTrafficManager(ctx, ns)
 		} else {

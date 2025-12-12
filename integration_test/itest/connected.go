@@ -2,6 +2,7 @@ package itest
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,5 +39,8 @@ func (ch *connected) setup(ctx context.Context) bool {
 }
 
 func (ch *connected) tearDown(ctx context.Context) {
+	if os.Getenv("TELEPRESENCE_TEST_SKIP_TEARDOWN") != "" {
+		return
+	}
 	TelepresenceQuitOk(ctx)
 }

@@ -23,6 +23,11 @@ func ApplyService(ctx context.Context, name, namespace, image string, port, targ
 	t := getT(ctx)
 	t.Helper()
 	require.NoError(t, Kubectl(ctx, namespace, "create", "deploy", name, "--image", image), "failed to create deployment %s", name)
+	// Ensure OTEL auto-instrumentation is injected for echo pods during tests
+	require.NoError(t,
+		Kubectl(ctx, namespace, "patch", "deployment", name, "--type", "merge",
+			"-p", `{"spec":{"template":{"metadata":{"annotations":{"instrumentation.opentelemetry.io/inject-go":"otel-instrumentation"}}}}}`),
+		"failed to annotate deployment %s", name)
 	require.NoError(t, Kubectl(ctx, namespace, "expose", "deploy", name, "--port", strconv.Itoa(port), "--target-port", strconv.Itoa(targetPort)),
 		"failed to expose deployment %s", name)
 	require.NoError(t, Kubectl(ctx, namespace, "rollout", "status", "-w", "deployment/"+name), "failed to deploy %s", name)

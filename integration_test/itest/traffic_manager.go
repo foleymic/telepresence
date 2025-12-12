@@ -3,6 +3,7 @@ package itest
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -57,12 +58,22 @@ func WithTrafficManager(np NamespacePair, f func(ctx context.Context, ch Traffic
 func (th *trafficManager) setup(ctx context.Context) bool {
 	t := getT(ctx)
 	TelepresenceQuitOk(ctx)
+	// When reusing an existing manager namespace, skip helm install.
+	if os.Getenv("TELEPRESENCE_TEST_MANAGER_NAMESPACE") != "" {
+		return true
+	}
 	_, err := th.TelepresenceHelmInstall(ctx, false)
 	return assert.NoError(t, err)
 }
 
 func (th *trafficManager) tearDown(ctx context.Context) {
-	th.UninstallTrafficManager(ctx, th.ManagerNamespace())
+	if os.Getenv("TELEPRESENCE_TEST_SKIP_TEARDOWN") != "" {
+		return
+	}
+	// Never uninstall when reusing an existing manager namespace.
+	if os.Getenv("TELEPRESENCE_TEST_MANAGER_NAMESPACE") == "" {
+		th.UninstallTrafficManager(ctx, th.ManagerNamespace())
+	}
 }
 
 func (th *trafficManager) trafficManagerConnection(ctx context.Context) (*grpc.ClientConn, error) {
